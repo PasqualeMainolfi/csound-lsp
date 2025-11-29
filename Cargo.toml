@@ -1,0 +1,9 @@
+[package]
+name = "csound-lsp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lsp-server = "0.7.9"
+serde = { version = "1.0.228", features = ["derive"]}
+serde_json = "1.0.145"
