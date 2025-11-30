@@ -29,14 +29,11 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
-        let n_opcodes = self.opcodes.len();
-        if n_opcodes == 0 {
-            self.client.log_message(MessageType::INFO, format!("LSP started number of opcodes loaded inmemory: {}", n_opcodes)).await;
-        }
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
                 ..Default::default()
             },
             ..Default::default()
@@ -60,6 +57,16 @@ impl LanguageServer for Backend {
         d.insert(uri, text);
     }
 
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let uri = params.text_document.uri;
+
+        if let Some(current_change) = params.content_changes.into_iter().next() {
+            let text = current_change.text;
+            let mut d = self.docs.write().await;
+            d.insert(uri, text);
+        }
+    }
+
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let pos = params.text_document_position_params.position;
         let uri = params.text_document_position_params.text_document.uri.clone();
@@ -78,13 +85,10 @@ impl LanguageServer for Backend {
 
         if let Some(node) = parser::find_node_at_position(&tree, &pos) {
             let node_kind = node.kind();
-            let node_type = node.utf8_text(text.as_bytes()).unwrap_or("???");
+            let node_type = node.utf8_text(text.as_bytes()).unwrap_or("???"); // opcode key
 
-            self.client.log_message(MessageType::INFO, format!("Cursor on: point {}, type: {}", node_kind, node_type)).await;
-
-            if node.kind() == "opcode_name" {
-                let opcode_key = node.utf8_text(text.as_bytes()).unwrap();
-                if let Some(reference) = self.opcodes.get(opcode_key) {
+            if node_kind == "opcode_name" {
+                if let Some(reference) = self.opcodes.get(node_type) {
                     return Ok(Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
                                 kind: MarkupKind::Markdown,
@@ -94,11 +98,9 @@ impl LanguageServer for Backend {
                         })
                     )
                 } else {
-                    self.client.log_message(MessageType::WARNING, format!("Manual not found for opcode {}", opcode_key)).await;
+                    self.client.log_message(MessageType::WARNING, format!("Manual not found for opcode {}", node_type)).await;
                 }
             }
-        } else {
-            self.client.log_message(MessageType::ERROR, format!("No node founded")).await;
         }
         Ok(None)
     }
