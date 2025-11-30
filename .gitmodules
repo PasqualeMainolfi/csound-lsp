@@ -1,0 +1,3 @@
+[submodule "tree-sitter-csound"]
+	path = tree-sitter-csound
+	url = https://github.com/PasqualeMainolfi/tree-sitter-csound.git
