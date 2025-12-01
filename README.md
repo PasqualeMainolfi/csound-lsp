@@ -5,4 +5,6 @@ The goal of this project is to provide a modern development experience for Csoun
 
 **Current Status**
 This project is under active development.  
-Many features are incomplete or experimental, and breaking changes are expected.
+Many features are incomplete or experimental, and breaking changes are expected.  
+
+![img_example](img_examples/img1.png)
