@@ -30,16 +30,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout LSP code
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          path: csound-lsp
-
-      - name: Checkout Tree-sitter code
-        uses: actions/checkout@v4
-        with:
-          repository: PasqualeMainolfi/tree-sitter-csound
-          path: tree-sitter-csound
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -47,17 +41,15 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
-        working-directory: csound-lsp
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename binary
         shell: bash
-        working-directory: csound-lsp
         run: |
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp target/${{ matrix.target }}/release/csound-lsp.exe ../${{ matrix.name }}
+            cp target/${{ matrix.target }}/release/csound-lsp.exe ${{ matrix.name }}
           else
-            cp target/${{ matrix.target }}/release/csound-lsp ../${{ matrix.name }}
+            cp target/${{ matrix.target }}/release/csound-lsp ${{ matrix.name }}
           fi
 
       - name: Upload asset
