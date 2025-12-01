@@ -13,4 +13,4 @@ tree-sitter = "0.25.10"
 rust-embed = "8.9.0"
 
 [dependencies.tree-sitter-csound]
-path = "./tree-sitter-csound"
+path = "tree-sitter-csound"
