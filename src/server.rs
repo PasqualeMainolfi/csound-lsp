@@ -59,12 +59,72 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
+        let mut diagnostics = Vec::new();
 
         if let Some(current_change) = params.content_changes.into_iter().next() {
             let text = current_change.text;
             let mut d = self.docs.write().await;
-            d.insert(uri, text);
+            d.insert(uri.clone(), text.clone());
+
+            let tree = parser::parse_doc(&text);
+            let nodes_to_diagnostics = parser::iterate_tree(&tree, &text);
+
+            for node in nodes_to_diagnostics.opcodes {
+                let node_type = node.utf8_text(text.as_bytes()).unwrap();
+                if !nodes_to_diagnostics.udo.contains(node_type) && !nodes_to_diagnostics.udt.contains(node_type) {
+                    match self.opcodes.get(node_type) {
+                        Some(_) => {},
+                        None => {
+                            diagnostics.push(Diagnostic {
+                                range: parser::get_node_range(&node),
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                source: Some("csound-lsp".into()),
+                                message: format!("Unknown opcode: <{}>", node_type),
+                                ..Default::default()
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+
+            for node in nodes_to_diagnostics.types {
+                let type_identifier = parser::get_node_name(node, &text).unwrap();
+                if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) {
+                    diagnostics.push(Diagnostic {
+                        range: parser::get_node_range(&node),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        source: Some("csound-lsp".into()),
+                        message: format!("Unknown type identifier: <{}>", type_identifier),
+                        ..Default::default()
+                        }
+                    );
+                }
+            }
+
+            for node in nodes_to_diagnostics.generic_errors {
+                let node_name = parser::get_node_name(node.node, &text).unwrap();
+                let message = match node.error_type {
+                    parser::GErrors::Syntax => {
+                        format!("Syntax error: <{}>", node_name)
+                    },
+                    parser::GErrors::ExplicitType => {
+                        format!("Unknown Type identifier: <{}>", node_name)
+                    }
+                };
+
+                diagnostics.push(Diagnostic {
+                    range: parser::get_node_range(&node.node),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    source: Some("csound-lsp".into()),
+                    message: message,
+                    ..Default::default()
+                    }
+                );
+            }
         }
+
+        self.client.publish_diagnostics(uri, diagnostics, None).await;
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -81,7 +141,6 @@ impl LanguageServer for Backend {
         };
 
         let tree = parser::parse_doc(&text);
-
 
         if let Some(node) = parser::find_node_at_position(&tree, &pos) {
             let node_kind = node.kind();
