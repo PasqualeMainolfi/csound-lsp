@@ -12,7 +12,8 @@ use std::sync::Arc;
 pub struct Backend {
     client: Client,
     docs: Arc<RwLock<HashMap<Url, String>>>,
-    opcodes: HashMap<String, String>
+    opcodes: HashMap<String, String>,
+    user_defined_types: Arc<RwLock<HashMap<String, String>>>
 }
 
 impl Backend {
@@ -21,7 +22,8 @@ impl Backend {
         Self {
             client,
             docs: Arc::new(RwLock::new(HashMap::new())),
-            opcodes
+            opcodes,
+            user_defined_types: Arc::new(RwLock::new(HashMap::new()))
         }
     }
 }
