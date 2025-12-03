@@ -3,7 +3,7 @@ use crate::parser;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{ Client, LanguageServer };
-use std::collections::HashMap;
+use std::collections::{ HashMap, HashSet };
 use tokio::sync::RwLock;
 use std::sync::Arc;
 
@@ -62,14 +62,16 @@ impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         let mut diagnostics = Vec::new();
+        let mut cached_diag: HashSet<(u32, u32, String)> = HashSet::new();
 
         if let Some(current_change) = params.content_changes.into_iter().next() {
             let text = current_change.text;
             let mut d = self.docs.write().await;
             d.insert(uri.clone(), text.clone());
 
+            let mut local_udt = self.user_defined_types.write().await;
             let tree = parser::parse_doc(&text);
-            let nodes_to_diagnostics = parser::iterate_tree(&tree, &text);
+            let nodes_to_diagnostics = parser::iterate_tree(&tree, &text, &mut local_udt);
 
             for node in nodes_to_diagnostics.opcodes {
                 let node_type = node.utf8_text(text.as_bytes()).unwrap();
@@ -77,14 +79,16 @@ impl LanguageServer for Backend {
                     match self.opcodes.get(node_type) {
                         Some(_) => {},
                         None => {
-                            diagnostics.push(Diagnostic {
+                            let diag = Diagnostic {
                                 range: parser::get_node_range(&node),
                                 severity: Some(DiagnosticSeverity::ERROR),
                                 source: Some("csound-lsp".into()),
                                 message: format!("Unknown opcode: <{}>", node_type),
                                 ..Default::default()
-                                }
-                            );
+                            };
+                            if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                                diagnostics.push(diag);
+                            }
                         }
                     }
                 }
@@ -93,14 +97,16 @@ impl LanguageServer for Backend {
             for node in nodes_to_diagnostics.types {
                 let type_identifier = parser::get_node_name(node, &text).unwrap();
                 if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) {
-                    diagnostics.push(Diagnostic {
+                    let diag = Diagnostic {
                         range: parser::get_node_range(&node),
                         severity: Some(DiagnosticSeverity::ERROR),
                         source: Some("csound-lsp".into()),
                         message: format!("Unknown type identifier: <{}>", type_identifier),
                         ..Default::default()
-                        }
-                    );
+                    };
+                    if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                        diagnostics.push(diag);
+                    }
                 }
             }
 
@@ -114,18 +120,18 @@ impl LanguageServer for Backend {
                         format!("Unknown Type identifier: <{}>", node_name)
                     }
                 };
-
-                diagnostics.push(Diagnostic {
+                let diag = Diagnostic {
                     range: parser::get_node_range(&node.node),
                     severity: Some(DiagnosticSeverity::ERROR),
                     source: Some("csound-lsp".into()),
                     message: message,
                     ..Default::default()
-                    }
-                );
+                };
+                if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                    diagnostics.push(diag);
+                }
             }
         }
-
         self.client.publish_diagnostics(uri, diagnostics, None).await;
     }
 
@@ -148,19 +154,53 @@ impl LanguageServer for Backend {
             let node_kind = node.kind();
             let node_type = node.utf8_text(text.as_bytes()).unwrap_or("???"); // opcode key
 
-            if node_kind == "opcode_name" {
-                if let Some(reference) = self.opcodes.get(node_type) {
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Markup(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value: reference.clone(),
-                            }),
-                            range: None,
-                        })
-                    )
-                } else {
-                    self.client.log_message(MessageType::WARNING, format!("Manual not found for opcode {}", node_type)).await;
-                }
+
+            self.client.log_message(MessageType::INFO,
+                format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}'",
+                node_kind,
+                parser::get_node_name(node, &text).unwrap_or_default(),
+                node.parent().map(|p| p.kind()).unwrap_or("None")
+            )).await;
+
+            match node_kind {
+                "opcode_name" => {
+                    if let Some(reference) = self.opcodes.get(node_type) {
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: reference.clone(),
+                                }),
+                                range: None,
+                            })
+                        )
+                    } else {
+                        self.client.log_message(MessageType::WARNING, format!("Manual not found for opcode {}", node_type)).await;
+                    }
+                },
+                "identifier" => {
+                    let is_type = node.parent()
+                        .map(|p| p.kind() == "typed_identifier" || p.kind() == "type_identifier")
+                        .unwrap_or(false);
+
+                    if is_type {
+                        if let Some(child_type_name) = parser::get_node_name(node, &text) {
+                            let local_udt = self.user_defined_types.read().await;
+                            if local_udt.contains_key(&child_type_name) {
+                                let sd = local_udt.get(&child_type_name).unwrap();
+                                let md = format!("## User-Defined Types\n```\n{}\n```", sd);
+                                return Ok(Some(Hover {
+                                    contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value: md,
+                                        }),
+                                        range: None,
+                                    })
+                                )
+                            }
+                        }
+                    }
+                },
+                _ => {}
             }
         }
         Ok(None)

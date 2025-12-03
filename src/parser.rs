@@ -1,5 +1,5 @@
 use rust_embed::RustEmbed;
-use tower_lsp::lsp_types::{ Position, Range };
+use tower_lsp::lsp_types::{ Position, Range, Diagnostic };
 use tree_sitter::{ Node, Parser, Point, Tree };
 use std::path::Path;
 use std::collections::{HashMap, HashSet};
@@ -66,6 +66,18 @@ enum OpcodeCheck {
     Udo
 }
 
+pub fn is_diagnostic_cached(diag_key: &Diagnostic, cached_diagnostics: &mut HashSet<(u32, u32, String)>) -> bool {
+    let dkey = (
+        diag_key.range.start.line,
+        diag_key.range.end.character,
+        diag_key.message.clone()
+    );
+    if !cached_diagnostics.contains(&dkey) {
+        cached_diagnostics.insert(dkey);
+        return false;
+    }
+    return true;
+}
 
 pub fn get_node_name<'a>(node: Node<'a>, text: &String) -> Option<String> {
     if let Ok(name) = node.utf8_text(text.as_bytes()) {
@@ -94,7 +106,7 @@ pub fn is_valid_type<'a>(type_identifier: &String) -> bool {
     }
 }
 
-pub fn iterate_tree<'a>(tree: &'a Tree, text: &String) -> NodeCollects<'a> {
+pub fn iterate_tree<'a>(tree: &'a Tree, text: &String, user_defined_types: &mut HashMap<String, String>) -> NodeCollects<'a> {
     let root_node = tree.root_node().walk();
     let mut to_visit = vec![root_node.node()];
     let mut nodes_to_diagnostics = NodeCollects::new();
@@ -127,10 +139,26 @@ pub fn iterate_tree<'a>(tree: &'a Tree, text: &String) -> NodeCollects<'a> {
             "struct_definition" => {
                 if let Some(node_type) = node.child_by_field_name("name") {
                     if let Some(node_name) = get_node_name(node_type, &text) {
+                        let node_key = node_name.clone();
                         nodes_to_diagnostics.udt.insert(node_name);
+
+                        if !user_defined_types.contains_key(&node_key) {
+                            let mut formats = Vec::new();
+                            let mut cursor = node.walk();
+                            for child in node.children_by_field_name("fields", &mut cursor) {
+                                let child_name = child.child_by_field_name("name").and_then(|n| get_node_name(n, &text));
+                                let child_type = child.child_by_field_name("type").and_then(|n| get_node_name(n, &text));
+
+                                if let (Some(nc), Some(tc)) = (child_name, child_type) {
+                                    formats.push(format!("{}:{}", nc, tc));
+                                }
+                            }
+                            let struct_format = format!("struct {} {}", node_key, formats.join(", "));
+                            user_defined_types.insert(node_key, struct_format);
+                        }
                     };
                 }
-            }
+            },
             // check ERROR node
             "ERROR" => {
                 if let Some(node_name) = get_node_name(node, &text) {
