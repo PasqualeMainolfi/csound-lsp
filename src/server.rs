@@ -117,7 +117,7 @@ impl LanguageServer for Backend {
                         format!("Syntax error: <{}>", node_name)
                     },
                     parser::GErrors::ExplicitType => {
-                        format!("Unknown Type identifier: <{}>", node_name)
+                        format!("Generic error, unknown Type identifier: <{}>", node_name)
                     }
                 };
                 let diag = Diagnostic {
@@ -153,7 +153,6 @@ impl LanguageServer for Backend {
         if let Some(node) = parser::find_node_at_position(&tree, &pos) {
             let node_kind = node.kind();
             let node_type = node.utf8_text(text.as_bytes()).unwrap_or("???"); // opcode key
-
 
             self.client.log_message(MessageType::INFO,
                 format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}'",

@@ -97,13 +97,35 @@ fn check_opcode<'a>(node: Node<'a>) -> Option<OpcodeCheck> {
     None
 }
 
-pub fn is_valid_type<'a>(type_identifier: &String) -> bool {
+pub fn is_valid_type(type_identifier: &String) -> bool {
     let trimmed = type_identifier.trim_end_matches("[]");
     match trimmed {
         "InstrDef" | "Instr" | "Opcode" | "Complex" => true,
         "a" | "i" | "k" | "S" | "f" | "w" | "b" => true,
         _ => false
     }
+}
+
+fn is_valid_modern_outputs(type_identifier: &String) -> bool {
+    let trimmed = type_identifier.trim();
+    if trimmed.eq_ignore_ascii_case("void") {
+        return true;
+    }
+
+    let mut chars = trimmed.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            'a' | 'f' | 'i' | 'j' | 'k' | 'K' | 'S' => { },
+            '[' => {
+                if chars.next() != Some(']') {
+                    return false
+                }
+            },
+            _ => return false
+        }
+    }
+
+    true
 }
 
 pub fn iterate_tree<'a>(tree: &'a Tree, text: &String, user_defined_types: &mut HashMap<String, String>) -> NodeCollects<'a> {
@@ -159,22 +181,70 @@ pub fn iterate_tree<'a>(tree: &'a Tree, text: &String, user_defined_types: &mut 
                     };
                 }
             },
+            // check modern udo outputs
+            "udo_definition_modern" => {
+                if let Some(outputs_node) = node.child_by_field_name("outputs") {
+                    let mut cursor = outputs_node.walk();
+                    let children: Vec<_> = outputs_node.children(&mut cursor).collect();
+
+                    let open_paren = children.iter().find(|n| n.kind() == "(");
+                    let close_paren = children.iter().find(|n| n.kind() == ")");
+
+                    if let Some(open) = open_paren {
+                        let content_start_byte = open.end_byte();
+
+                        let content_end_byte = if let Some(close) = close_paren {
+                            close.start_byte()
+                        } else {
+                            outputs_node.end_byte()
+                        };
+
+                        if content_end_byte > content_start_byte {
+                            let raw_content = &text[content_start_byte..content_end_byte];
+                            if raw_content != "void" {
+                                for (_, char) in raw_content.char_indices() {
+                                    let is_valid = match char {
+                                        'a' | 'f' | 'i' | 'j' | 'k' | 'K' | 'S' | '[' | ']' | ' ' | '\t' => true,
+                                        _ => false
+                                    };
+
+                                    if !is_valid {
+                                        nodes_to_diagnostics.generic_errors.push(GenericError {
+                                            node: outputs_node,
+                                            error_type: GErrors::ExplicitType,
+                                        });
+                                    }
+                                }
+                                if !is_valid_modern_outputs(&raw_content.trim().to_string()) {
+                                    nodes_to_diagnostics.generic_errors.push(GenericError {
+                                        node: outputs_node,
+                                        error_type: GErrors::ExplicitType,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             // check ERROR node
             "ERROR" => {
                 if let Some(node_name) = get_node_name(node, &text) {
                     let trim_name = node_name.trim();
-                    if trim_name.len() == 1 || trim_name.contains(":") {
-                        nodes_to_diagnostics.generic_errors.push(GenericError {
-                                node: node,
-                                error_type: GErrors::ExplicitType
-                            }
-                        );
-                    } else {
-                        nodes_to_diagnostics.generic_errors.push(GenericError {
-                                node: node,
-                                error_type: GErrors::Syntax
-                            }
-                        );
+                    let current_parent_kind = node.parent().unwrap().kind();
+                    if current_parent_kind != "modern_udo_outputs" && (!trim_name.contains(")") && !trim_name.contains(",")) {
+                        if trim_name.len() == 1 || trim_name.contains(":") {
+                            nodes_to_diagnostics.generic_errors.push(GenericError {
+                                    node: node,
+                                    error_type: GErrors::ExplicitType
+                                }
+                            );
+                        } else {
+                            nodes_to_diagnostics.generic_errors.push(GenericError {
+                                    node: node,
+                                    error_type: GErrors::Syntax
+                                }
+                            );
+                        }
                     }
                 }
             },
