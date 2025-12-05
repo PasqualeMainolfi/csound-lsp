@@ -106,16 +106,37 @@ pub fn is_valid_type(type_identifier: &String) -> bool {
     }
 }
 
-fn is_valid_modern_outputs(type_identifier: &String) -> bool {
+fn is_valid_output_udo_types<'a>(type_identifier: &String, node: Node<'a>) -> bool {
     let trimmed = type_identifier.trim();
-    if trimmed.eq_ignore_ascii_case("void") {
-        return true;
+    if node.kind() == "udo_definition_modern" {
+        if trimmed.eq_ignore_ascii_case("void") {
+            return true;
+        }
     }
 
     let mut chars = trimmed.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             'a' | 'f' | 'i' | 'j' | 'k' | 'K' | 'S' => { },
+            '[' => {
+                if chars.next() != Some(']') {
+                    return false
+                }
+            },
+            _ => return false
+        }
+    }
+
+    true
+}
+
+fn is_valid_input_udo_types(type_identifier: &String) -> bool {
+    let trimmed = type_identifier.trim();
+
+    let mut chars = trimmed.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            'a' | 'f' | 'i' | 'j' | 'k' | 'o' | 'p' | 'O' | 'P' | 'V' | 'J' | 'K' | 'S' | '0' => { },
             '[' => {
                 if chars.next() != Some(']') {
                     return false
@@ -181,45 +202,78 @@ pub fn iterate_tree<'a>(tree: &'a Tree, text: &String, user_defined_types: &mut 
                     };
                 }
             },
-            // check modern udo outputs
-            "udo_definition_modern" => {
-                if let Some(outputs_node) = node.child_by_field_name("outputs") {
-                    let mut cursor = outputs_node.walk();
-                    let children: Vec<_> = outputs_node.children(&mut cursor).collect();
+            "legacy_udo_args" => {
+                if let Some(text_content) = get_node_name(node, &text) {
 
-                    let open_paren = children.iter().find(|n| n.kind() == "(");
-                    let close_paren = children.iter().find(|n| n.kind() == ")");
+                    let is_inputs_context = node.parent()
+                        .and_then(|p| p.child_by_field_name("inputs"))
+                        .map(|in_node| in_node.start_byte() == node.start_byte())
+                        .unwrap_or(false);
 
-                    if let Some(open) = open_paren {
-                        let content_start_byte = open.end_byte();
+                    for (_, char) in text_content.char_indices() {
 
-                        let content_end_byte = if let Some(close) = close_paren {
-                            close.start_byte()
+                        let is_valid = if is_inputs_context {
+                            match char {
+                                'a'|'f'|'i'|'j'|'k'|'K'|'S'|'0'|'p'|'P'|'o'|'O'|'V'|'J'|'['|']' => true,
+                                _ => false // La 'c' cade qui
+                            }
                         } else {
-                            outputs_node.end_byte()
+                            match char {
+                                'a'|'f'|'i'|'j'|'k'|'K'|'S'|'0'|'['|']' => true,
+                                _ => false
+                            }
                         };
 
-                        if content_end_byte > content_start_byte {
-                            let raw_content = &text[content_start_byte..content_end_byte];
-                            if raw_content != "void" {
-                                for (_, char) in raw_content.char_indices() {
-                                    let is_valid = match char {
-                                        'a' | 'f' | 'i' | 'j' | 'k' | 'K' | 'S' | '[' | ']' | ' ' | '\t' => true,
-                                        _ => false
-                                    };
+                        if !is_valid {
+                            nodes_to_diagnostics.generic_errors.push(GenericError {
+                                node: node,
+                                error_type: GErrors::ExplicitType,
+                            });
+                        }
+                    }
+                }
+            },
+            // check modern udo outputs
+            "udo_definition_modern" | "udo_definition_legacy" => {
+                if let Some(outputs_node) = node.child_by_field_name("outputs") {
+                    let mut cursor = outputs_node.walk();
+                    let children = outputs_node.children(&mut cursor).collect::<Vec<_>>();
 
-                                    if !is_valid {
+                    let boundary = match node.kind() {
+                        "udo_definition_modern" => {
+                            Some((
+                                children.iter().find(|n| n.kind() == "("),
+                                children.iter().find(|n| n.kind() == ")")
+                            ))
+                        },
+                        "udo_definition_legacy" => {
+                            Some((
+                                children.iter().find(|n| n.kind() == ","),
+                                children.iter().find(|n| n.kind() == ",")
+                            ))
+                        },
+                        _ => None
+                    };
+
+                    if let Some((b_start, b_end)) = boundary {
+                        if let Some(open) = b_start {
+                            let content_start_byte = open.end_byte();
+
+                            let content_end_byte = if let Some(close) = b_end {
+                                close.start_byte()
+                            } else {
+                                outputs_node.end_byte()
+                            };
+
+                            if content_end_byte > content_start_byte {
+                                let raw_content = &text[content_start_byte..content_end_byte];
+                                if raw_content != "void" {
+                                    if !is_valid_output_udo_types(&raw_content.trim().to_string(), node) {
                                         nodes_to_diagnostics.generic_errors.push(GenericError {
                                             node: outputs_node,
                                             error_type: GErrors::ExplicitType,
                                         });
                                     }
-                                }
-                                if !is_valid_modern_outputs(&raw_content.trim().to_string()) {
-                                    nodes_to_diagnostics.generic_errors.push(GenericError {
-                                        node: outputs_node,
-                                        error_type: GErrors::ExplicitType,
-                                    });
                                 }
                             }
                         }
