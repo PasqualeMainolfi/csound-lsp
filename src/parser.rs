@@ -97,24 +97,28 @@ impl UserDefinitions {
     }
 
     pub fn add_udo<'a>(&mut self, node: Node<'a>, key: &String, text: &String) {
-        if !self.user_definined_opcodes.contains_key(key) {
-            let mut formats = Vec::new();
-            let inputs_node = node.child_by_field_name("inputs");
-            if let Some(inputs) = inputs_node {
-                let inputs_text = get_node_name(inputs, &text).unwrap();
-                formats.push(inputs_text);
+        let mut formats = Vec::new();
+        let inputs_node = node.child_by_field_name("inputs");
+        if let Some(inputs) = inputs_node {
+            let inputs_text = get_node_name(inputs, &text).unwrap();
+            formats.push(inputs_text);
 
-                let outputs_node = node.child_by_field_name("outputs");
-                if let Some(outputs) = outputs_node {
-                    let outputs_text = get_node_name(outputs, &text).unwrap();
-                    formats.push(outputs_text);
-                }
-                let opcode_format = match node.kind() {
-                    "udo_definition_legacy" => format!("opcode {} {}", key, formats.join(", ")),
-                    "udo_definition_modern" => format!("opcode {} {}", key, formats.join(":")),
-                    _ => { "No defition".to_string() }
-                };
+            let outputs_node = node.child_by_field_name("outputs");
+            if let Some(outputs) = outputs_node {
+                let outputs_text = get_node_name(outputs, &text).unwrap();
+                formats.push(outputs_text);
+            }
+            let opcode_format = match node.kind() {
+                "udo_definition_legacy" => format!("opcode {} {}", key, formats.join(", ")),
+                "udo_definition_modern" => format!("opcode {} {}", key, formats.join(":")),
+                _ => { "No defition".to_string() }
+            };
+            if !self.user_definined_opcodes.contains_key(key) {
                 self.user_definined_opcodes.insert(key.clone(), opcode_format);
+            } else {
+                if let Some (f) = self.user_definined_opcodes.get_mut(key) {
+                    *f = opcode_format;
+                }
             }
         }
     }
@@ -282,7 +286,7 @@ pub fn iterate_tree<'a>(tree: &'a Tree, text: &String, user_definitions: &mut Us
                 if let Some(node_name) = get_node_name(node, &text) {
                     let trim_name = node_name.trim();
                     let current_parent_kind = node.parent().unwrap().kind();
-                    if current_parent_kind != "modern_udo_outputs" && (!trim_name.contains(")") && !trim_name.contains(",")) {
+                    if current_parent_kind != "modern_udo_outputs" && (!trim_name.contains(")") && !trim_name.contains(",") && !trim_name.contains("]")) {
                         if trim_name.len() == 1 || trim_name.contains(":") {
                             nodes_to_diagnostics.generic_errors.push(GenericError {
                                     node: node,
