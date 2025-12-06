@@ -13,7 +13,7 @@ pub struct Backend {
     client: Client,
     docs: Arc<RwLock<HashMap<Url, String>>>,
     opcodes: HashMap<String, String>,
-    user_defined_types: Arc<RwLock<HashMap<String, String>>>
+    user_definitions: Arc<RwLock<parser::UserDefinitions>>
 }
 
 impl Backend {
@@ -23,7 +23,7 @@ impl Backend {
             client,
             docs: Arc::new(RwLock::new(HashMap::new())),
             opcodes,
-            user_defined_types: Arc::new(RwLock::new(HashMap::new()))
+            user_definitions: Arc::new(RwLock::new(parser::UserDefinitions::new()))
         }
     }
 }
@@ -69,9 +69,9 @@ impl LanguageServer for Backend {
             let mut d = self.docs.write().await;
             d.insert(uri.clone(), text.clone());
 
-            let mut local_udt = self.user_defined_types.write().await;
+            let mut local_ud = self.user_definitions.write().await;
             let tree = parser::parse_doc(&text);
-            let nodes_to_diagnostics = parser::iterate_tree(&tree, &text, &mut local_udt);
+            let nodes_to_diagnostics = parser::iterate_tree(&tree, &text, &mut local_ud);
 
             for node in nodes_to_diagnostics.opcodes {
                 let node_type = node.utf8_text(text.as_bytes()).unwrap();
@@ -163,6 +163,20 @@ impl LanguageServer for Backend {
 
             match node_kind {
                 "opcode_name" => {
+                    let local_udo = self.user_definitions.read().await;
+                    if local_udo.user_definined_opcodes.contains_key(&node_type.to_string()) {
+                        let ud = local_udo.user_definined_opcodes.get(&node_type.to_string()).unwrap();
+                        let md = format!("## User-Defined Opcode\n```\n{}\n```", ud);
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: md,
+                                }),
+                                range: None,
+                            })
+                        )
+                    }
+
                     if let Some(reference) = self.opcodes.get(node_type) {
                         return Ok(Some(Hover {
                             contents: HoverContents::Markup(MarkupContent {
@@ -183,10 +197,10 @@ impl LanguageServer for Backend {
 
                     if is_type {
                         if let Some(child_type_name) = parser::get_node_name(node, &text) {
-                            let local_udt = self.user_defined_types.read().await;
-                            if local_udt.contains_key(&child_type_name) {
-                                let sd = local_udt.get(&child_type_name).unwrap();
-                                let md = format!("## User-Defined Types\n```\n{}\n```", sd);
+                            let local_udt = self.user_definitions.read().await;
+                            if local_udt.user_defined_types.contains_key(&child_type_name) {
+                                let sd = local_udt.user_defined_types.get(&child_type_name).unwrap();
+                                let md = format!("## User-Defined Type\n```\n{}\n```", sd);
                                 return Ok(Some(Hover {
                                     contents: HoverContents::Markup(MarkupContent {
                                             kind: MarkupKind::Markdown,
