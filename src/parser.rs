@@ -170,16 +170,29 @@ pub fn is_valid_type(type_identifier: &String) -> bool {
 
 fn is_valid_output_udo_types<'a>(type_identifier: &String, node: Node<'a>) -> bool {
     let trimmed = type_identifier.trim();
-    if node.kind() == "modern_udo_outputs" {
-        if trimmed.eq_ignore_ascii_case("void") {
-            return true;
-        }
+
+    match node.kind() {
+        "modern_udo_outputs" => {
+            if trimmed.eq_ignore_ascii_case("void") {
+                return true
+            }
+        },
+        "udo_definition_legacy" => {
+            if trimmed.contains('0') {
+                if trimmed.len() == 1 {
+                    return true
+                } else {
+                    return false
+                }
+            }
+        },
+        _ => { }
     }
 
     let mut chars = trimmed.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            'a' | 'f' | 'i' | 'j' | 'k' | 'K' | 'S' => { }, // add 0 for legacy
+            'a' | 'f' | 'i' | 'j' | 'k' | 'K' | 'S'  => { },
             '[' => {
                 if chars.next() != Some(']') {
                     return false
