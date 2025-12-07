@@ -39,8 +39,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-          profile: minimal
-          override: true
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
