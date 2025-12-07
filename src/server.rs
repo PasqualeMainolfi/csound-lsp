@@ -164,8 +164,8 @@ impl LanguageServer for Backend {
             match node_kind {
                 "opcode_name" => {
                     let local_udo = self.user_definitions.read().await;
-                    if local_udo.user_definined_opcodes.contains_key(&node_type.to_string()) {
-                        let ud = local_udo.user_definined_opcodes.get(&node_type.to_string()).unwrap();
+                    if local_udo.user_defined_opcodes.contains_key(&node_type.to_string()) {
+                        let ud = local_udo.user_defined_opcodes.get(&node_type.to_string()).unwrap();
                         let md = format!("## User-Defined Opcode\n```\n{}\n```", ud);
                         return Ok(Some(Hover {
                             contents: HoverContents::Markup(MarkupContent {

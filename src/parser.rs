@@ -68,31 +68,35 @@ enum OpcodeCheck {
 #[derive(Debug)]
 pub struct UserDefinitions {
     pub user_defined_types: HashMap<String, String>,
-    pub user_definined_opcodes: HashMap<String, String>
+    pub user_defined_opcodes: HashMap<String, String>
 }
 
 impl UserDefinitions {
     pub fn new() -> Self {
         Self {
             user_defined_types: HashMap::new(),
-            user_definined_opcodes: HashMap::new()
+            user_defined_opcodes: HashMap::new()
         }
     }
 
     pub fn add_udt<'a>(&mut self, node: Node<'a>, key: &String, text: &String) {
-        if !self.user_defined_types.contains_key(key) {
-            let mut formats = Vec::new();
-            let mut cursor = node.walk();
-            for child in node.children_by_field_name("fields", &mut cursor) {
-                let child_name = child.child_by_field_name("name").and_then(|n| get_node_name(n, &text));
-                let child_type = child.child_by_field_name("type").and_then(|n| get_node_name(n, &text));
+        let mut formats = Vec::new();
+        let mut cursor = node.walk();
+        for child in node.children_by_field_name("fields", &mut cursor) {
+            let child_name = child.child_by_field_name("name").and_then(|n| get_node_name(n, &text));
+            let child_type = child.child_by_field_name("type").and_then(|n| get_node_name(n, &text));
 
-                if let (Some(nc), Some(tc)) = (child_name, child_type) {
-                    formats.push(format!("{}:{}", nc, tc));
-                }
+            if let (Some(nc), Some(tc)) = (child_name, child_type) {
+                formats.push(format!("{}:{}", nc, tc));
             }
-            let struct_format = format!("struct {} {}", key, formats.join(", "));
+        }
+        let struct_format = format!("struct {} {}", key, formats.join(", "));
+        if !self.user_defined_types.contains_key(key) {
             self.user_defined_types.insert(key.clone(), struct_format);
+        } else {
+            if let Some (f) = self.user_defined_types.get_mut(key) {
+                *f = struct_format;
+            }
         }
     }
 
@@ -113,10 +117,10 @@ impl UserDefinitions {
                 "udo_definition_modern" => format!("opcode {} {}", key, formats.join(":")),
                 _ => { "No defition".to_string() }
             };
-            if !self.user_definined_opcodes.contains_key(key) {
-                self.user_definined_opcodes.insert(key.clone(), opcode_format);
+            if !self.user_defined_opcodes.contains_key(key) {
+                self.user_defined_opcodes.insert(key.clone(), opcode_format);
             } else {
-                if let Some (f) = self.user_definined_opcodes.get_mut(key) {
+                if let Some (f) = self.user_defined_opcodes.get_mut(key) {
                     *f = opcode_format;
                 }
             }
