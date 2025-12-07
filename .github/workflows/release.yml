@@ -34,11 +34,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          profile: minimal
+          override: true
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -55,4 +58,4 @@ jobs:
       - name: Upload asset
         uses: softprops/action-gh-release@v1
         with:
-          files: ${{ matrix.name }}
+          files: csound-lsp-*
