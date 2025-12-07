@@ -57,4 +57,4 @@ jobs:
       - name: Upload asset
         uses: softprops/action-gh-release@v1
         with:
-          files: csound-lsp-*
+          files: ${{ matrix.name }}
