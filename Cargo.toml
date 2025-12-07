@@ -1,6 +1,6 @@
 [package]
 name = "csound-lsp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
@@ -13,4 +13,4 @@ tree-sitter = "0.25.10"
 rust-embed = "8.9.0"
 
 [dependencies.tree-sitter-csound]
-path = "tree-sitter-csound"
+path = "/Users/pm/AcaHub/Coding/tree-sitter-csound/csound-tree-sitter"
