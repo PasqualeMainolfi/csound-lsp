@@ -4,8 +4,12 @@ use tree_sitter::{ Node, Parser, Point, Tree };
 use std::fmt::{ Display, Formatter };
 use std::fmt;
 use std::path::Path;
-use std::collections::{HashMap, HashSet};
+use std::collections::{ HashMap, HashSet };
+use serde::Deserialize;
+use std::fs;
 use tree_sitter_csound::LANGUAGE;
+
+const OPCODE_DATA_PATH: &str = "/Users/pm/AcaHub/Coding/tree-sitter-csound/csound-tree-sitter/snippets/csound.json";
 
 #[derive(RustEmbed)]
 #[folder = "tree-sitter-csound/csound_manual/docs/opcodes"]
@@ -16,6 +20,39 @@ pub fn parse_doc(text: &str) -> Tree {
     let language = LANGUAGE.into();
     p.set_language(&language).unwrap();
     p.parse(text, None).unwrap()
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum BodyOpCompletion {
+    SingleLine(String),
+    MultipleLine(Vec<String>)
+}
+
+
+#[derive(Deserialize, Debug)]
+pub struct OpcodesData {
+    pub prefix: String,
+    pub body: BodyOpCompletion,
+    pub description: String
+}
+
+pub fn read_opcode_data() -> Option<HashMap<String, OpcodesData>>{
+    let file = match fs::read_to_string(OPCODE_DATA_PATH) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Json opcode data not found: {}", e);
+            return None
+        }
+    };
+
+    match serde_json::from_str::<HashMap<String, OpcodesData>>(&file) {
+        Ok(map) => Some(map),
+        Err(e) => {
+            eprintln!("ERROR: Could not parse opcode JSON: {}", e);
+            None
+        }
+    }
 }
 
 fn has_ancestor_of_kind(node: Node, kind: &str) -> bool {
@@ -48,7 +85,7 @@ pub struct NodeCollects<'a> {
     pub types: Vec<Node<'a>>,
     pub generic_errors: Vec<GenericError<'a>>,
     pub udt: HashSet<String>,
-    pub typed_vars: HashMap<String, String>
+    pub typed_vars: HashMap<(String, Scope), String>
 }
 
 impl<'a> NodeCollects<'a> {
@@ -69,16 +106,28 @@ enum OpcodeCheck {
     Udo
 }
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub enum Scope {
+    Local(String),
+    Global
+}
+
 #[derive(Debug)]
 pub struct UserDefinedType {
     pub udt_name: String,
     pub udt_format: String,
+    pub udt_scope: Option<Scope>,
     pub udt_members: Option<Vec<(String, String)>>,
 }
 
 impl UserDefinedType {
     pub fn new() -> Self {
-        Self { udt_name: String::new(), udt_format: String::new(), udt_members: None }
+        Self {
+            udt_name: String::new(),
+            udt_format: String::new(),
+            udt_scope: None,
+            udt_members: None
+        }
     }
 }
 
@@ -98,7 +147,7 @@ impl Display for UserDefinedType {
 
 #[derive(Debug)]
 pub struct UserDefinitions {
-    pub user_defined_types: HashMap<String, UserDefinedType>,
+    pub user_defined_types: HashMap<(String, Scope), UserDefinedType>,
     pub user_defined_opcodes: HashMap<String, String>
 }
 
@@ -106,7 +155,7 @@ impl UserDefinitions {
     pub fn new() -> Self {
         Self {
             user_defined_types: HashMap::new(),
-            user_defined_opcodes: HashMap::new()
+            user_defined_opcodes: HashMap::new(),
         }
     }
 
@@ -130,13 +179,18 @@ impl UserDefinitions {
             local_udt.udt_members = Some(completion_items);
         }
 
-        if !self.user_defined_types.contains_key(key) {
+        let scope = find_scope(node, &text);
+        let scope_key = (key.clone(), scope.clone());
+
+        if !self.user_defined_types.contains_key(&scope_key) {
             local_udt.udt_name = key.clone();
             local_udt.udt_format = struct_format;
-            self.user_defined_types.insert(key.clone(), local_udt);
+            local_udt.udt_scope = Some(scope);
+            self.user_defined_types.insert(scope_key, local_udt);
         } else {
-            if let Some (f) = self.user_defined_types.get_mut(key) {
+            if let Some (f) = self.user_defined_types.get_mut(&scope_key) {
                 (*f).udt_format = struct_format;
+                (*f).udt_scope = Some(scope);
             }
         }
     }
@@ -298,12 +352,15 @@ pub fn iterate_tree<'a>(
                     if node_explicit_type.kind() == "identifier" {
                         nodes_to_diagnostics.types.push(node_explicit_type);
                     }
+
                     let name = get_node_name(node_name, &text).unwrap();
+                    let s = find_scope(node, &text);
+                    let key = (name, s);
                     let ty = get_node_name(node_explicit_type, &text).unwrap();
-                    if let Some(n) = nodes_to_diagnostics.typed_vars.get_mut(&name) {
+                    if let Some(n) = nodes_to_diagnostics.typed_vars.get_mut(&key) {
                         *n = ty
                     } else {
-                        nodes_to_diagnostics.typed_vars.insert(name, ty);
+                        nodes_to_diagnostics.typed_vars.insert(key, ty);
                     }
                 };
             },
@@ -356,7 +413,10 @@ pub fn iterate_tree<'a>(
             "ERROR" => {
                 if let Some(node_name) = get_node_name(node, &text) {
                     let trim_name = node_name.trim();
-                    let current_parent_kind = node.parent().unwrap().kind();
+                    let current_parent_kind = node.parent()
+                        .map(|p| p.kind())
+                        .unwrap_or("");
+
                     if current_parent_kind != "modern_udo_outputs" && (!trim_name.contains(")") && !trim_name.contains(",") && !trim_name.contains("]")) {
                         if trim_name.len() == 1 || trim_name.contains(":") {
                             nodes_to_diagnostics.generic_errors.push(GenericError {
@@ -417,6 +477,47 @@ pub fn find_node_at_position<'a>(tree: &'a Tree, pos: &Position) -> Option<Node<
         Point::new(row, col),
         Point::new(row, col),
     )
+}
+
+pub fn find_node_at_cursor<'a>(tree: &'a Tree, pos: &Position, text: &str) -> Option<Node<'a>> {
+    let target_line = pos.line as usize;
+    let target_char = pos.character as usize;
+
+    let line = text.lines().nth(target_line).unwrap_or("");
+
+    let mut current_char_utf16 = 0 as usize;
+    let mut current_char_utf8 = 0 as usize;
+    for char in line.chars() {
+        let char_utf16 = char.len_utf16();
+        if current_char_utf16 + char_utf16 >= target_char {
+            break;
+        }
+        current_char_utf16 += char_utf16;
+        current_char_utf8 += char.len_utf8();
+    }
+
+    find_node_at_position(&tree, &Position { line: target_line as u32, character: current_char_utf8 as u32})
+
+}
+
+pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
+    let mut current_node = node;
+    loop {
+        if current_node.kind() == "instrument_definition" || current_node.kind() == "instr" {
+            if let Some(node_child) = current_node.child_by_field_name("name") {
+                if let Some(n) = get_node_name(node_child, &text) {
+                    return Scope::Local(n)
+                }
+            }
+            return Scope::Global
+        }
+
+        if let Some(p) = current_node.parent() {
+            current_node = p;
+        } else {
+            return Scope::Global
+        }
+    };
 }
 
 pub fn load_opcodes() -> HashMap<String, String> {
