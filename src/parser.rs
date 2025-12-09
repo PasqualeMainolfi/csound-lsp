@@ -1,9 +1,15 @@
 use rust_embed::RustEmbed;
 use tower_lsp::lsp_types::{ Position, Range, Diagnostic };
 use tree_sitter::{ Node, Parser, Point, Tree };
+use std::fmt::{ Display, Formatter };
+use std::fmt;
 use std::path::Path;
-use std::collections::{HashMap, HashSet};
+use std::collections::{ HashMap, HashSet };
+use serde::Deserialize;
+use std::fs;
 use tree_sitter_csound::LANGUAGE;
+
+const OPCODE_DATA_PATH: &str = "/tree-sitter-csound/snippets/csound.json";
 
 #[derive(RustEmbed)]
 #[folder = "tree-sitter-csound/csound_manual/docs/opcodes"]
@@ -14,6 +20,39 @@ pub fn parse_doc(text: &str) -> Tree {
     let language = LANGUAGE.into();
     p.set_language(&language).unwrap();
     p.parse(text, None).unwrap()
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum BodyOpCompletion {
+    SingleLine(String),
+    MultipleLine(Vec<String>)
+}
+
+
+#[derive(Deserialize, Debug)]
+pub struct OpcodesData {
+    pub prefix: String,
+    pub body: BodyOpCompletion,
+    pub description: String
+}
+
+pub fn read_opcode_data() -> Option<HashMap<String, OpcodesData>>{
+    let file = match fs::read_to_string(OPCODE_DATA_PATH) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Json opcode data not found: {}", e);
+            return None
+        }
+    };
+
+    match serde_json::from_str::<HashMap<String, OpcodesData>>(&file) {
+        Ok(map) => Some(map),
+        Err(e) => {
+            eprintln!("ERROR: Could not parse opcode JSON: {}", e);
+            None
+        }
+    }
 }
 
 fn has_ancestor_of_kind(node: Node, kind: &str) -> bool {
@@ -45,7 +84,8 @@ pub struct NodeCollects<'a> {
     pub udo: HashSet<String>,
     pub types: Vec<Node<'a>>,
     pub generic_errors: Vec<GenericError<'a>>,
-    pub udt: HashSet<String>
+    pub udt: HashSet<String>,
+    pub typed_vars: HashMap<(String, Scope), String>
 }
 
 impl<'a> NodeCollects<'a> {
@@ -55,7 +95,8 @@ impl<'a> NodeCollects<'a> {
             udo: HashSet::new(),
             types: Vec::new(),
             generic_errors: Vec::new(),
-            udt: HashSet::new()
+            udt: HashSet::new(),
+            typed_vars: HashMap::new()
         }
     }
 }
@@ -65,9 +106,48 @@ enum OpcodeCheck {
     Udo
 }
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub enum Scope {
+    Local(String),
+    Global
+}
+
+#[derive(Debug)]
+pub struct UserDefinedType {
+    pub udt_name: String,
+    pub udt_format: String,
+    pub udt_scope: Option<Scope>,
+    pub udt_members: Option<Vec<(String, String)>>,
+}
+
+impl UserDefinedType {
+    pub fn new() -> Self {
+        Self {
+            udt_name: String::new(),
+            udt_format: String::new(),
+            udt_scope: None,
+            udt_members: None
+        }
+    }
+}
+
+impl Display for UserDefinedType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{} {}", self.udt_name, self.udt_format)?;
+        if let Some(ref members) = self.udt_members {
+            for member in members {
+                write!(f, "{}:{}", member.0, member.1)?;
+            }
+        } else {
+            write!(f, "No members")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct UserDefinitions {
-    pub user_defined_types: HashMap<String, String>,
+    pub user_defined_types: HashMap<(String, Scope), UserDefinedType>,
     pub user_defined_opcodes: HashMap<String, String>
 }
 
@@ -75,27 +155,42 @@ impl UserDefinitions {
     pub fn new() -> Self {
         Self {
             user_defined_types: HashMap::new(),
-            user_defined_opcodes: HashMap::new()
+            user_defined_opcodes: HashMap::new(),
         }
     }
 
     pub fn add_udt<'a>(&mut self, node: Node<'a>, key: &String, text: &String) {
         let mut formats = Vec::new();
+        let mut completion_items = Vec::new();
         let mut cursor = node.walk();
+        let mut local_udt = UserDefinedType::new();
         for child in node.children_by_field_name("fields", &mut cursor) {
             let child_name = child.child_by_field_name("name").and_then(|n| get_node_name(n, &text));
             let child_type = child.child_by_field_name("type").and_then(|n| get_node_name(n, &text));
 
             if let (Some(nc), Some(tc)) = (child_name, child_type) {
                 formats.push(format!("{}:{}", nc, tc));
+                completion_items.push((nc, tc));
             }
         }
+
         let struct_format = format!("struct {} {}", key, formats.join(", "));
-        if !self.user_defined_types.contains_key(key) {
-            self.user_defined_types.insert(key.clone(), struct_format);
+        if !formats.is_empty() {
+            local_udt.udt_members = Some(completion_items);
+        }
+
+        let scope = find_scope(node, &text);
+        let scope_key = (key.clone(), scope.clone());
+
+        if !self.user_defined_types.contains_key(&scope_key) {
+            local_udt.udt_name = key.clone();
+            local_udt.udt_format = struct_format;
+            local_udt.udt_scope = Some(scope);
+            self.user_defined_types.insert(scope_key, local_udt);
         } else {
-            if let Some (f) = self.user_defined_types.get_mut(key) {
-                *f = struct_format;
+            if let Some (f) = self.user_defined_types.get_mut(&scope_key) {
+                (*f).udt_format = struct_format;
+                (*f).udt_scope = Some(scope);
             }
         }
     }
@@ -170,16 +265,29 @@ pub fn is_valid_type(type_identifier: &String) -> bool {
 
 fn is_valid_output_udo_types<'a>(type_identifier: &String, node: Node<'a>) -> bool {
     let trimmed = type_identifier.trim();
-    if node.kind() == "modern_udo_outputs" {
-        if trimmed.eq_ignore_ascii_case("void") {
-            return true;
-        }
+
+    match node.kind() {
+        "modern_udo_outputs" => {
+            if trimmed.eq_ignore_ascii_case("void") {
+                return true
+            }
+        },
+        "udo_definition_legacy" => {
+            if trimmed.contains('0') {
+                if trimmed.len() == 1 {
+                    return true
+                } else {
+                    return false
+                }
+            }
+        },
+        _ => { }
     }
 
     let mut chars = trimmed.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            'a' | 'f' | 'i' | 'j' | 'k' | 'K' | 'S' => { }, // add 0 for legacy
+            'a' | 'f' | 'i' | 'j' | 'k' | 'K' | 'S'  => { },
             '[' => {
                 if chars.next() != Some(']') {
                     return false
@@ -211,7 +319,12 @@ fn is_valid_input_udo_types(type_identifier: &String) -> bool {
     true
 }
 
-pub fn iterate_tree<'a>(tree: &'a Tree, text: &String, user_definitions: &mut UserDefinitions) -> NodeCollects<'a> {
+pub fn iterate_tree<'a>(
+    tree: &'a Tree,
+    text: &String,
+    user_definitions: &mut UserDefinitions
+) -> NodeCollects<'a> {
+
     let root_node = tree.root_node().walk();
     let mut to_visit = vec![root_node.node()];
     let mut nodes_to_diagnostics = NodeCollects::new();
@@ -235,8 +348,19 @@ pub fn iterate_tree<'a>(tree: &'a Tree, text: &String, user_definitions: &mut Us
             // check types
             "typed_identifier" => {
                 if let Some(node_explicit_type) = node.child_by_field_name("type") {
+                    let node_name = node.child_by_field_name("name").unwrap();
                     if node_explicit_type.kind() == "identifier" {
                         nodes_to_diagnostics.types.push(node_explicit_type);
+                    }
+
+                    let name = get_node_name(node_name, &text).unwrap();
+                    let s = find_scope(node, &text);
+                    let key = (name, s);
+                    let ty = get_node_name(node_explicit_type, &text).unwrap();
+                    if let Some(n) = nodes_to_diagnostics.typed_vars.get_mut(&key) {
+                        *n = ty
+                    } else {
+                        nodes_to_diagnostics.typed_vars.insert(key, ty);
                     }
                 };
             },
@@ -289,7 +413,10 @@ pub fn iterate_tree<'a>(tree: &'a Tree, text: &String, user_definitions: &mut Us
             "ERROR" => {
                 if let Some(node_name) = get_node_name(node, &text) {
                     let trim_name = node_name.trim();
-                    let current_parent_kind = node.parent().unwrap().kind();
+                    let current_parent_kind = node.parent()
+                        .map(|p| p.kind())
+                        .unwrap_or("");
+
                     if current_parent_kind != "modern_udo_outputs" && (!trim_name.contains(")") && !trim_name.contains(",") && !trim_name.contains("]")) {
                         if trim_name.len() == 1 || trim_name.contains(":") {
                             nodes_to_diagnostics.generic_errors.push(GenericError {
@@ -350,6 +477,47 @@ pub fn find_node_at_position<'a>(tree: &'a Tree, pos: &Position) -> Option<Node<
         Point::new(row, col),
         Point::new(row, col),
     )
+}
+
+pub fn find_node_at_cursor<'a>(tree: &'a Tree, pos: &Position, text: &str) -> Option<Node<'a>> {
+    let target_line = pos.line as usize;
+    let target_char = pos.character as usize;
+
+    let line = text.lines().nth(target_line).unwrap_or("");
+
+    let mut current_char_utf16 = 0 as usize;
+    let mut current_char_utf8 = 0 as usize;
+    for char in line.chars() {
+        let char_utf16 = char.len_utf16();
+        if current_char_utf16 + char_utf16 >= target_char {
+            break;
+        }
+        current_char_utf16 += char_utf16;
+        current_char_utf8 += char.len_utf8();
+    }
+
+    find_node_at_position(&tree, &Position { line: target_line as u32, character: current_char_utf8 as u32})
+
+}
+
+pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
+    let mut current_node = node;
+    loop {
+        if current_node.kind() == "instrument_definition" || current_node.kind() == "instr" {
+            if let Some(node_child) = current_node.child_by_field_name("name") {
+                if let Some(n) = get_node_name(node_child, &text) {
+                    return Scope::Local(n)
+                }
+            }
+            return Scope::Global
+        }
+
+        if let Some(p) = current_node.parent() {
+            current_node = p;
+        } else {
+            return Scope::Global
+        }
+    };
 }
 
 pub fn load_opcodes() -> HashMap<String, String> {

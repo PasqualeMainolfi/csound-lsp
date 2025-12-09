@@ -18,6 +18,12 @@ If you already cloned without `--recursive`, run:
 git submodule update --init --recursive
 ```
 
+To update submodules later:
+
+```bash
+git submodule update --remote --recursive
+```
+
 To install the language server, run:
 
 ```bash
