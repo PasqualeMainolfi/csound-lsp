@@ -9,7 +9,7 @@ use serde::Deserialize;
 use std::fs;
 use tree_sitter_csound::LANGUAGE;
 
-const OPCODE_DATA_PATH: &str = "/tree-sitter-csound/snippets/csound.json";
+const OPCODE_DATA_PATH: &str = "tree-sitter-csound/snippets/csound.json";
 
 #[derive(RustEmbed)]
 #[folder = "tree-sitter-csound/csound_manual/docs/opcodes"]
