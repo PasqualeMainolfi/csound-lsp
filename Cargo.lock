@@ -112,11 +112,7 @@ dependencies = [
 
 [[package]]
 name = "csound-lsp"
-<<<<<<< HEAD
-version = "0.1.1"
-=======
 version = "0.1.2"
->>>>>>> dev
 dependencies = [
  "lsp-server",
  "rust-embed",

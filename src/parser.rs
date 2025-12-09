@@ -6,14 +6,16 @@ use std::fmt;
 use std::path::Path;
 use std::collections::{ HashMap, HashSet };
 use serde::Deserialize;
-use std::fs;
 use tree_sitter_csound::LANGUAGE;
 
-const OPCODE_DATA_PATH: &str = "tree-sitter-csound/snippets/csound.json";
 
 #[derive(RustEmbed)]
 #[folder = "tree-sitter-csound/csound_manual/docs/opcodes"]
 struct Asset;
+
+#[derive(RustEmbed)]
+#[folder = "tree-sitter-csound/snippets"]
+struct AssetOpcodeReference;
 
 pub fn parse_doc(text: &str) -> Tree {
     let mut p = Parser::new();
@@ -29,7 +31,6 @@ pub enum BodyOpCompletion {
     MultipleLine(Vec<String>)
 }
 
-
 #[derive(Deserialize, Debug)]
 pub struct OpcodesData {
     pub prefix: String,
@@ -37,16 +38,18 @@ pub struct OpcodesData {
     pub description: String
 }
 
-pub fn read_opcode_data() -> Option<HashMap<String, OpcodesData>>{
-    let file = match fs::read_to_string(OPCODE_DATA_PATH) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Json opcode data not found: {}", e);
+pub fn read_opcode_data() -> Option<HashMap<String, OpcodesData>> {
+    let file = match AssetOpcodeReference::get("csound.json") {
+        Some(c) => c,
+        None => {
+            eprintln!("LSP Error: Json opcode data file not found");
             return None
         }
     };
 
-    match serde_json::from_str::<HashMap<String, OpcodesData>>(&file) {
+    let content = std::str::from_utf8(file.data.as_ref()).unwrap_or("");
+
+    match serde_json::from_str::<HashMap<String, OpcodesData>>(&content) {
         Ok(map) => Some(map),
         Err(e) => {
             eprintln!("ERROR: Could not parse opcode JSON: {}", e);
