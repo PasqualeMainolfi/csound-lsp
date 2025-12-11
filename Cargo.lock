@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "csound-lsp"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "lsp-server",
  "rust-embed",
@@ -955,6 +955,7 @@ dependencies = [
 [[package]]
 name = "tree-sitter-csound"
 version = "0.1.2"
+source = "git+https://github.com/PasqualeMainolfi/tree-sitter-csound.git#abc160026856c12d68ba9b912d9e1f4247b637eb"
 dependencies = [
  "cc",
  "tree-sitter-language",

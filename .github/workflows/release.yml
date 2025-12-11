@@ -32,8 +32,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Update tree-sitter-csound dependency
+        run: cargo update -p tree-sitter-csound
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

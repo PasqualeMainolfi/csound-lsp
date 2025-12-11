@@ -21,6 +21,7 @@ cargo install --path
 or, you can build from source:
 
 ```bash
+cargo update tree-sitter-csound
 cargo build --release
 ```
 
