@@ -6,22 +6,10 @@ The goal of this project is to provide a modern development experience for Csoun
 **Installation**  
 You can download the latest binary from the Release page or install from source.  
 From source: you need the csound-lsp executable available in your system PATH.  
-Cloning the repo. The project uses git submodules, so make to clone it with:  
+Cloning the repo:
 
 ```bash
 git clone --recursive https://github.com/PasqualeMainolfi/csound-lsp.git 
-```
-
-If you already cloned without `--recursive`, run:
-
-```bash
-git submodule update --init --recursive
-```
-
-To update submodules later:
-
-```bash
-git submodule update --remote --recursive
 ```
 
 To install the language server, run:

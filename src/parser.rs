@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use rust_embed::RustEmbed;
 use tower_lsp::lsp_types::{ Position, Range, Diagnostic };
 use tree_sitter::{ Node, Parser, Point, Tree };
@@ -10,12 +12,12 @@ use tree_sitter_csound::LANGUAGE;
 
 
 #[derive(RustEmbed)]
-#[folder = "tree-sitter-csound/csound_manual/docs/opcodes"]
-struct Asset;
+#[folder = "csound_data"]
+struct AssetCsoundOpcodeCompletion;
 
 #[derive(RustEmbed)]
-#[folder = "tree-sitter-csound/snippets"]
-struct AssetOpcodeReference;
+#[folder = "csound_data/opcodes"]
+struct AssetCsoundOpcodeReferences;
 
 pub fn parse_doc(text: &str) -> Tree {
     let mut p = Parser::new();
@@ -39,7 +41,7 @@ pub struct OpcodesData {
 }
 
 pub fn read_opcode_data() -> Option<HashMap<String, OpcodesData>> {
-    let file = match AssetOpcodeReference::get("csound.json") {
+    let file = match AssetCsoundOpcodeCompletion::get("csound.json") {
         Some(c) => c,
         None => {
             eprintln!("LSP Error: Json opcode data file not found");
@@ -88,7 +90,7 @@ pub struct NodeCollects<'a> {
     pub types: Vec<Node<'a>>,
     pub generic_errors: Vec<GenericError<'a>>,
     pub udt: HashSet<String>,
-    pub typed_vars: HashMap<(String, Scope), String>
+    pub typed_vars: HashMap<String, String>
 }
 
 impl<'a> NodeCollects<'a> {
@@ -119,7 +121,6 @@ pub enum Scope {
 pub struct UserDefinedType {
     pub udt_name: String,
     pub udt_format: String,
-    pub udt_scope: Option<Scope>,
     pub udt_members: Option<Vec<(String, String)>>,
 }
 
@@ -128,7 +129,6 @@ impl UserDefinedType {
         Self {
             udt_name: String::new(),
             udt_format: String::new(),
-            udt_scope: None,
             udt_members: None
         }
     }
@@ -150,7 +150,7 @@ impl Display for UserDefinedType {
 
 #[derive(Debug)]
 pub struct UserDefinitions {
-    pub user_defined_types: HashMap<(String, Scope), UserDefinedType>,
+    pub user_defined_types: HashMap<String, UserDefinedType>,
     pub user_defined_opcodes: HashMap<String, String>
 }
 
@@ -182,18 +182,13 @@ impl UserDefinitions {
             local_udt.udt_members = Some(completion_items);
         }
 
-        let scope = find_scope(node, &text);
-        let scope_key = (key.clone(), scope.clone());
-
-        if !self.user_defined_types.contains_key(&scope_key) {
+        if !self.user_defined_types.contains_key(&key.clone()) {
             local_udt.udt_name = key.clone();
             local_udt.udt_format = struct_format;
-            local_udt.udt_scope = Some(scope);
-            self.user_defined_types.insert(scope_key, local_udt);
+            self.user_defined_types.insert(key.clone(), local_udt);
         } else {
-            if let Some (f) = self.user_defined_types.get_mut(&scope_key) {
+            if let Some (f) = self.user_defined_types.get_mut(key) {
                 (*f).udt_format = struct_format;
-                (*f).udt_scope = Some(scope);
             }
         }
     }
@@ -357,13 +352,11 @@ pub fn iterate_tree<'a>(
                     }
 
                     let name = get_node_name(node_name, &text).unwrap();
-                    let s = find_scope(node, &text);
-                    let key = (name, s);
                     let ty = get_node_name(node_explicit_type, &text).unwrap();
-                    if let Some(n) = nodes_to_diagnostics.typed_vars.get_mut(&key) {
+                    if let Some(n) = nodes_to_diagnostics.typed_vars.get_mut(&name) {
                         *n = ty
                     } else {
-                        nodes_to_diagnostics.typed_vars.insert(key, ty);
+                        nodes_to_diagnostics.typed_vars.insert(name, ty);
                     }
                 };
             },
@@ -526,7 +519,7 @@ pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
 pub fn load_opcodes() -> HashMap<String, String> {
     let mut map = HashMap::new();
 
-    for file_path in Asset::iter() {
+    for file_path in AssetCsoundOpcodeReferences::iter() {
         let file_name = file_path.as_ref();
         if file_name.ends_with(".md") {
             let name = Path::new(file_name)
@@ -534,7 +527,7 @@ pub fn load_opcodes() -> HashMap<String, String> {
                 .unwrap_or("")
                 .to_string();
 
-            if let Some(content_file) = Asset::get(file_name) {
+            if let Some(content_file) = AssetCsoundOpcodeReferences::get(file_name) {
                 if let Ok(content_str) = std::str::from_utf8(content_file.data.as_ref()) {
                     map.insert(name, content_str.to_string());
                 }
