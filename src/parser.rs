@@ -1,6 +1,7 @@
 #![allow(unused)]
 
-use rust_embed::RustEmbed;
+use rust_embed::{EmbeddedFile, RustEmbed};
+use tower_lsp::lsp_types::lsif::ItemKind;
 use tower_lsp::lsp_types::{ Position, Range, Diagnostic };
 use tree_sitter::{ Node, Parser, Point, Tree };
 use std::fmt::{ Display, Formatter };
@@ -9,7 +10,6 @@ use std::path::Path;
 use std::collections::{ HashMap, HashSet };
 use serde::Deserialize;
 use tree_sitter_csound::LANGUAGE;
-
 
 #[derive(RustEmbed)]
 #[folder = "csound_data"]
@@ -40,24 +40,53 @@ pub struct OpcodesData {
     pub description: String
 }
 
-pub fn read_opcode_data() -> Option<HashMap<String, OpcodesData>> {
-    let file = match AssetCsoundOpcodeCompletion::get("csound.json") {
-        Some(c) => c,
-        None => {
-            eprintln!("LSP Error: Json opcode data file not found");
-            return None
-        }
+#[derive(Deserialize, Debug)]
+pub struct OMacro {
+    pub value: String,
+    pub equivalent_to: String
+}
+
+#[derive(Debug)]
+pub struct CsoundJsonData {
+    pub opcodes_data: Option<HashMap<String, OpcodesData>>,
+    pub omacros_data: Option<HashMap<String, OMacro>>
+}
+
+pub fn read_csound_json_data() -> CsoundJsonData {
+    let mut cj: CsoundJsonData = CsoundJsonData{ opcodes_data: None, omacros_data: None };
+
+    let opfile: Option<EmbeddedFile> = match AssetCsoundOpcodeCompletion::get("csound.json") {
+        Some(c) => Some(c),
+        None => None
     };
 
-    let content = std::str::from_utf8(file.data.as_ref()).unwrap_or("");
+    let omfile: Option<EmbeddedFile> = match AssetCsoundOpcodeCompletion::get("omacro.json") {
+        Some(c) => Some(c),
+        None => None
+    };
 
-    match serde_json::from_str::<HashMap<String, OpcodesData>>(&content) {
-        Ok(map) => Some(map),
-        Err(e) => {
-            eprintln!("ERROR: Could not parse opcode JSON: {}", e);
-            None
-        }
+    if let Some(f) = opfile {
+        let content = std::str::from_utf8(f.data.as_ref()).unwrap_or("");
+        cj.opcodes_data = match serde_json::from_str::<HashMap<String, OpcodesData>>(&content) {
+            Ok(map) => Some(map),
+            Err(e) => {
+                eprintln!("ERROR: Could not parse opcode JSON: {}", e);
+                None
+            }
+        };
     }
+
+    if let Some(f) = omfile {
+        let content = std::str::from_utf8(f.data.as_ref()).unwrap_or("");
+        cj.omacros_data = match serde_json::from_str::<HashMap<String, OMacro>>(&content) {
+            Ok(map) => Some(map),
+            Err(e) => {
+                eprintln!("ERROR: Could not parse omacro JSON: {}", e);
+                None
+            }
+        };
+    }
+    cj
 }
 
 fn has_ancestor_of_kind(node: Node, kind: &str) -> bool {
@@ -90,7 +119,8 @@ pub struct NodeCollects<'a> {
     pub types: Vec<Node<'a>>,
     pub generic_errors: Vec<GenericError<'a>>,
     pub udt: HashSet<String>,
-    pub typed_vars: HashMap<String, String>
+    pub typed_vars: HashMap<String, String>,
+    pub user_definitions: UserDefinitions
 }
 
 impl<'a> NodeCollects<'a> {
@@ -101,7 +131,8 @@ impl<'a> NodeCollects<'a> {
             types: Vec::new(),
             generic_errors: Vec::new(),
             udt: HashSet::new(),
-            typed_vars: HashMap::new()
+            typed_vars: HashMap::new(),
+            user_definitions: UserDefinitions::new()
         }
     }
 }
@@ -113,8 +144,16 @@ enum OpcodeCheck {
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub enum Scope {
-    Local(String),
+    Instr(String),
+    Udo(String),
     Global
+}
+
+#[derive(Debug, PartialEq)]
+pub enum AccessVariableType {
+    Read,
+    Write,
+    Update
 }
 
 #[derive(Debug)]
@@ -148,10 +187,34 @@ impl Display for UserDefinedType {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct UserDefinedVariable {
+    pub node_location: usize,
+    pub var_name: String,
+    pub var_scope: Scope,
+    pub var_calls: usize,
+    pub is_undefined: bool,
+    pub is_unused: bool,
+    pub references: Vec<Range>
+}
+
+#[derive(Debug, Clone)]
+pub struct UserDefinedMacro {
+    pub node_location: usize,
+    pub macro_name: String,
+    pub macro_label: String,
+    pub macro_values: String
+}
+
 #[derive(Debug)]
 pub struct UserDefinitions {
     pub user_defined_types: HashMap<String, UserDefinedType>,
-    pub user_defined_opcodes: HashMap<String, String>
+    pub user_defined_opcodes: HashMap<String, String>,
+    pub user_defined_macros: HashMap<String, UserDefinedMacro>,
+    pub undefined_vars: Vec<UserDefinedVariable>,
+    pub unused_vars: Vec<UserDefinedVariable>,
+    local_defined_vars: HashMap<Scope, HashMap<String, UserDefinedVariable>>,
+    global_defined_vars: HashMap<String, UserDefinedVariable>,
 }
 
 impl UserDefinitions {
@@ -159,10 +222,98 @@ impl UserDefinitions {
         Self {
             user_defined_types: HashMap::new(),
             user_defined_opcodes: HashMap::new(),
+            user_defined_macros: HashMap::new(),
+            undefined_vars: Vec::new(),
+            unused_vars: Vec::new(),
+            local_defined_vars: HashMap::new(),
+            global_defined_vars: HashMap::new()
+        }
+    }
+
+    fn update_var_use<'a>(node: Node<'a>, map: &mut HashMap<String, UserDefinedVariable>, k: &String, acc: &AccessVariableType) -> bool {
+        let node_range = get_node_range(&node);
+        if let Some(var) = map.get_mut(k) {
+            var.var_calls += 1;
+            match acc {
+                AccessVariableType::Read => {
+                    var.is_unused = false;
+                    if var.is_undefined { var.references.push(node_range); }
+                },
+                AccessVariableType::Write => {
+                    var.is_undefined = false;
+                    var.node_location = node.start_byte();
+                }
+                AccessVariableType::Update => {
+                    var.is_unused = false;
+                    if var.is_undefined { var.references.push(node_range); }
+                    var.is_undefined = false;
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    pub fn add_udv<'a>(&mut self, node: Node<'a>, key: &String, text: &String) {
+        let physical_scope = find_scope(node, text);
+        let access_type = get_access_type(node, text);
+
+        let parent = node.parent();
+        let pkind = parent.map(|p| p.kind()).unwrap_or("");
+
+        let is_global_syntax = pkind == "global_typed_identifier";
+        let is_typed_local_def = pkind == "typed_identifier";
+
+        let preferred_scope = if self.global_defined_vars.contains_key(key) {
+            Scope::Global
+        } else if is_global_syntax || physical_scope == Scope::Global {
+            Scope::Global
+        } else if key.starts_with("g") {
+            Scope::Global
+        } else  {
+            physical_scope.clone()
+        };
+
+        let mut found = false;
+        if preferred_scope == Scope::Global {
+            found = UserDefinitions::update_var_use(node, &mut self.global_defined_vars, &key, &access_type);
+        } else {
+            if let Some(local_map) = self.local_defined_vars.get_mut(&preferred_scope) {
+                found = UserDefinitions::update_var_use(node, local_map, &key, &access_type);
+            }
+        }
+
+        if !found && preferred_scope != Scope::Global && access_type != AccessVariableType::Write {
+            found = UserDefinitions::update_var_use(node, &mut self.global_defined_vars, &key, &access_type);
+        }
+
+        if !found {
+            let is_write = access_type == AccessVariableType::Write;
+            let mut udv = UserDefinedVariable {
+                node_location: node.start_byte(),
+                var_name: key.clone(),
+                var_scope: preferred_scope.clone(),
+                var_calls: 1,
+                is_undefined: !is_write,
+                is_unused: is_write,
+                references: Vec::new()
+            };
+
+            if !is_write { udv.references.push(get_node_range(&node)); }
+
+            if preferred_scope == Scope::Global {
+                self.global_defined_vars.insert(key.clone(), udv);
+            } else {
+                self.local_defined_vars
+                    .entry(preferred_scope)
+                    .or_insert_with(HashMap::new)
+                    .insert(key.clone(), udv);
+            }
         }
     }
 
     pub fn add_udt<'a>(&mut self, node: Node<'a>, key: &String, text: &String) {
+        let mut cache: HashSet<String> = HashSet::new();
         let mut formats = Vec::new();
         let mut completion_items = Vec::new();
         let mut cursor = node.walk();
@@ -170,6 +321,7 @@ impl UserDefinitions {
         for child in node.children_by_field_name("fields", &mut cursor) {
             let child_name = child.child_by_field_name("name").and_then(|n| get_node_name(n, &text));
             let child_type = child.child_by_field_name("type").and_then(|n| get_node_name(n, &text));
+
 
             if let (Some(nc), Some(tc)) = (child_name, child_type) {
                 formats.push(format!("{}:{}", nc, tc));
@@ -236,7 +388,8 @@ pub fn is_diagnostic_cached(diag_key: &Diagnostic, cached_diagnostics: &mut Hash
 
 pub fn get_node_name<'a>(node: Node<'a>, text: &String) -> Option<String> {
     if let Ok(name) = node.utf8_text(text.as_bytes()) {
-        return Some(name.to_string())
+        let clean_name = name.trim_end_matches(":");
+        return Some(clean_name.to_string())
     }
     None
 }
@@ -320,7 +473,6 @@ fn is_valid_input_udo_types(type_identifier: &String) -> bool {
 pub fn iterate_tree<'a>(
     tree: &'a Tree,
     text: &String,
-    user_definitions: &mut UserDefinitions
 ) -> NodeCollects<'a> {
 
     let root_node = tree.root_node().walk();
@@ -328,7 +480,6 @@ pub fn iterate_tree<'a>(
     let mut nodes_to_diagnostics = NodeCollects::new();
 
     while let Some(node) = to_visit.pop() {
-
         // check opcodes
         match check_opcode(node) {
             Some(OpcodeCheck::Opcode) => {
@@ -356,9 +507,73 @@ pub fn iterate_tree<'a>(
                     if let Some(n) = nodes_to_diagnostics.typed_vars.get_mut(&name) {
                         *n = ty
                     } else {
-                        nodes_to_diagnostics.typed_vars.insert(name, ty);
+                        nodes_to_diagnostics.typed_vars.insert(name.clone(), ty);
                     }
-                };
+
+                    let is_struct_field = node.parent().map(|p| p.kind() == "struct_definition").unwrap_or(false);
+                    if !is_struct_field {
+                        nodes_to_diagnostics.user_definitions.add_udv(node, &name, text);
+                    }
+                }
+            },
+            "identifier" | "type_identifier_legacy" => {
+                let parent = node.parent();
+                let should_skip = parent.map(|p| {
+                    let pk = p.kind();
+                    pk == "typed_identifier"        ||
+                    pk == "global_typed_identifier" ||
+                    pk == "struct_definition"       ||
+                    pk == "label_statement"         ||
+                    pk == "macro_define"            ||
+                    pk == "macro_name"              ||
+                    pk == "macro_usage"             ||
+                    pk == "score_nestable_loop"     ||
+                    pk == "score_body"              ||
+                    (pk == "struct_access" && p.child_by_field_name("member").map(|m| m.id() == node.id()).unwrap_or(false))  ||
+                    (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false)) ||
+                    (pk == "function_call" && p.child_by_field_name("function").map(|f| f.id() == node.id()).unwrap_or(false))
+                }).unwrap_or(false);
+
+                if !should_skip {
+                    if let Some(name) = get_node_name(node, text) {
+                        nodes_to_diagnostics.user_definitions.add_udv(node, &name, text);
+                    }
+                }
+            },
+            // check global vars
+            "global_typed_identifier" => {
+                if let Some(node_name) = node.child_by_field_name("name") {
+                    if let Some(name) = get_node_name(node_name, text) {
+                        nodes_to_diagnostics.user_definitions.add_udv(node_name, &name, text);
+                    }
+                }
+            },
+            // check macros
+            "macro_define" => {
+                if let Some(macro_name) = node.child_by_field_name("macro_name") {
+                    if let Some(macro_name_text) = get_node_name(macro_name, &text) {
+                        if let Some(macro_id) = macro_name.child_by_field_name("id") {
+                            let mid = get_node_name(macro_id, &text).unwrap_or_default();
+                            if let Some(values) = node.child_by_field_name("macro_values") {
+                                let mv = get_node_name(values, &text).unwrap_or_default();
+
+                                nodes_to_diagnostics.user_definitions.user_defined_macros
+                                    .entry(mid.clone())
+                                    .and_modify(|m| {
+                                        m.node_location = node.start_byte();
+                                        m.macro_label = macro_name_text.clone();
+                                        m.macro_values = mv.clone();
+                                    })
+                                    .or_insert_with(|| UserDefinedMacro {
+                                        node_location: node.start_byte(),
+                                        macro_name: mid.clone(),
+                                        macro_label: macro_name_text.clone(),
+                                        macro_values: mv.clone()
+                                    });
+                            }
+                        }
+                    }
+                }
             },
             // check user defined types
             "struct_definition" => {
@@ -366,7 +581,7 @@ pub fn iterate_tree<'a>(
                     if let Some(node_name) = get_node_name(node_type, &text) {
                         let node_key = node_name.clone();
                         nodes_to_diagnostics.udt.insert(node_name);
-                        user_definitions.add_udt(node, &node_key, &text);
+                        nodes_to_diagnostics.user_definitions.add_udt(node, &node_key, &text);
                     };
                 }
             },
@@ -374,7 +589,7 @@ pub fn iterate_tree<'a>(
                 if let Some(node_name) = node.child_by_field_name("name") {
                     if let Some(op_name) = get_node_name(node_name, &text) {
                         let node_key = op_name.clone();
-                        user_definitions.add_udo(node, &node_key, &text);
+                        nodes_to_diagnostics.user_definitions.add_udo(node, &node_key, &text);
                     }
                 }
             },
@@ -433,19 +648,25 @@ pub fn iterate_tree<'a>(
             _ => {}
         };
 
-        let mut child = node.walk();
-        for _ in 0..node.child_count() {
-            if child.goto_first_child() {
-                to_visit.push(child.node());
-                child.goto_parent();
-            }
-        }
-        for i in 0..node.child_count() {
+        for i in (0..node.child_count()).rev() {
             if let Some(c) = node.child(i) {
                 to_visit.push(c);
             }
         }
     }
+
+    for (_, lscope) in nodes_to_diagnostics.user_definitions.local_defined_vars.iter() {
+        for (_, var) in lscope.iter() {
+            if !var.references.is_empty() { nodes_to_diagnostics.user_definitions.undefined_vars.push(var.clone()); }
+            if var.is_unused { nodes_to_diagnostics.user_definitions.unused_vars.push(var.clone()); }
+        }
+    }
+
+    for (_, var) in nodes_to_diagnostics.user_definitions.global_defined_vars.iter() {
+        if !var.references.is_empty() { nodes_to_diagnostics.user_definitions.undefined_vars.push(var.clone()); }
+        if var.is_unused { nodes_to_diagnostics.user_definitions.unused_vars.push(var.clone()); }
+    }
+
     nodes_to_diagnostics
 }
 
@@ -496,24 +717,71 @@ pub fn find_node_at_cursor<'a>(tree: &'a Tree, pos: &Position, text: &str) -> Op
 
 }
 
+// find local scope
 pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
     let mut current_node = node;
     loop {
-        if current_node.kind() == "instrument_definition" || current_node.kind() == "instr" {
-            if let Some(node_child) = current_node.child_by_field_name("name") {
-                if let Some(n) = get_node_name(node_child, &text) {
-                    return Scope::Local(n)
+        if let Some(node_child) = current_node.child_by_field_name("name") {
+            if let Some(n) = get_node_name(node_child, &text) {
+                let ckind = current_node.kind();
+                match ckind {
+                    "instrument_definition" | "instr"  => return  Scope::Instr(n),
+                    "udo_definition_modern" | "udo_definition_legacy" => return  Scope::Udo(n),
+                    _ => { }
                 }
             }
-            return Scope::Global
         }
 
         if let Some(p) = current_node.parent() {
             current_node = p;
         } else {
-            return Scope::Global
+            return Scope::Global;
         }
     };
+}
+
+fn get_access_type(node: Node, text: &String) -> AccessVariableType {
+    let mut current_node = node;
+    for i in 0..6 {
+        let parent = match current_node.parent() {
+            Some(p) => p,
+            None => return AccessVariableType::Read
+        };
+
+        let p_kind = parent.kind();
+
+        if p_kind == "xin_statement" || p_kind == "modern_udo_inputs" { return AccessVariableType::Write; }
+
+        if p_kind.contains("assignment_statement") {
+            if let Some(left) = parent.child_by_field_name("left") {
+                if node.start_byte() >= left.start_byte() && current_node.end_byte() <= left.end_byte() {
+                    if let Some(op) = parent.child_by_field_name("operator") {
+                        if let Some(op_text) = get_node_name(op, text) {
+                            if ["+=", "-=", "*=", "/=", "%="].contains(&op_text.as_str()) {
+                                return AccessVariableType::Update;
+                            }
+                        }
+                    }
+                    return AccessVariableType::Write;
+                }
+            }
+            return AccessVariableType::Read;
+        }
+
+        if p_kind == "opcode_statement" {
+            if let Some(op_node) = parent.child_by_field_name("op") {
+                if current_node.end_byte() <= op_node.start_byte() {
+                    return AccessVariableType::Write;
+                }
+                if current_node.start_byte() >= op_node.end_byte() {
+                    return AccessVariableType::Read;
+                }
+            }
+        }
+
+        current_node = parent;
+    }
+    AccessVariableType::Read
 }
 
 pub fn load_opcodes() -> HashMap<String, String> {

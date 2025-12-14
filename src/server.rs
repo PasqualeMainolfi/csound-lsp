@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub struct CurrentDocument {
     pub text: String,
     pub tree: Tree,
-    pub user_definition: parser::UserDefinitions,
+    pub user_definitions: parser::UserDefinitions,
     pub cached_typed_vars: HashMap<String, String>
 }
 
@@ -21,18 +21,18 @@ pub struct Backend {
     client: Client,
     document_state: Arc<RwLock<HashMap<Url, CurrentDocument>>>,
     opcodes: HashMap<String, String>,
-    opcode_completion_list: Option<HashMap<String, parser::OpcodesData>>
+    json_reference_completion_list: parser::CsoundJsonData
 }
 
 impl Backend {
     pub fn new(client: Client) -> Self {
         let opcodes = parser::load_opcodes();
-        let opcode_completion_list = parser::read_opcode_data();
+        let json_reference_completion_list = parser::read_csound_json_data();
         Self {
             client,
             document_state: Arc::new(RwLock::new(HashMap::new())),
             opcodes,
-            opcode_completion_list
+            json_reference_completion_list
         }
     }
 }
@@ -47,7 +47,7 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
-                    trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+                    trigger_characters: Some(vec![".".to_string(), ":".to_string(), "$".to_string() ]),
                     work_done_progress_options: Default::default(),
                     all_commit_characters: None,
                     ..Default::default()
@@ -79,7 +79,7 @@ impl LanguageServer for Backend {
             CurrentDocument {
                 text,
                 tree,
-                user_definition: parser::UserDefinitions::new(),
+                user_definitions: parser::UserDefinitions::new(),
                 cached_typed_vars: HashMap::new()
             }
         );
@@ -103,8 +103,61 @@ impl LanguageServer for Backend {
                 let tree = parser::parse_doc(&text);
                 doc.text = text.clone();
                 doc.tree = tree;
-                let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text, &mut doc.user_definition);
+                let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text);
                 doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
+                doc.user_definitions = nodes_to_diagnostics.user_definitions;
+
+                for var in &doc.user_definitions.unused_vars {
+                    if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
+
+                        self.client.log_message(MessageType::INFO,
+                            format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
+                            finded_node.kind(),
+                            finded_node.parent().unwrap().kind(),
+                            var.var_name,
+                            var.var_calls,
+                            var.var_scope
+                        )).await;
+
+                        let diag = Diagnostic {
+                            range: parser::get_node_range(&finded_node),
+                            severity: Some(DiagnosticSeverity::WARNING),
+                            source: Some("csound-lsp".into()),
+                            message: "Unused variable".to_string(),
+                            ..Default::default()
+                        };
+                        if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                            diagnostics.push(diag);
+                        }
+                    }
+                }
+
+                for var in &doc.user_definitions.undefined_vars {
+                    if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
+
+                        self.client.log_message(MessageType::INFO,
+                                format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
+                            finded_node.kind(),
+                            finded_node.parent().unwrap().kind(),
+                            var.var_name,
+                            var.var_calls,
+                            var.var_scope
+                        )).await;
+
+                        for node_range in &var.references {
+                            let diag = Diagnostic {
+                                range: *node_range,
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                source: Some("csound-lsp".into()),
+                                message: "Undefined variable".to_string(),
+                                ..Default::default()
+                            };
+                            if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                                diagnostics.push(diag);
+                            }
+                        }
+                    }
+                }
 
                 for node in nodes_to_diagnostics.opcodes {
                     if let Some(node_type) = parser::get_node_name(node, &doc.text){
@@ -182,16 +235,16 @@ impl LanguageServer for Backend {
                 let node_type = node.utf8_text(doc.text.as_bytes()).unwrap_or("???"); // opcode key
 
                 self.client.log_message(MessageType::INFO,
-                    format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', id={}",
+                    format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}",
                     node_kind,
                     parser::get_node_name(node, &doc.text).unwrap_or_default(),
                     node.parent().map(|p| p.kind()).unwrap_or("None"),
-                    node.id()
+                    parser::find_scope(node, &doc.text)
                 )).await;
 
                 match node_kind {
                     "opcode_name" => {
-                        if let Some(ud) = doc.user_definition.user_defined_opcodes.get(&node_type.to_string()) {
+                        if let Some(ud) = doc.user_definitions.user_defined_opcodes.get(&node_type.to_string()) {
                             let md = format!("## User-Defined Opcode\n```\n{}\n```", ud);
                             return Ok(Some(Hover {
                                 contents: HoverContents::Markup(MarkupContent {
@@ -223,7 +276,7 @@ impl LanguageServer for Backend {
 
                         if is_type {
                             if let Some(child_type_name) = parser::get_node_name(node, &doc.text) {
-                                if let Some(sd) = doc.user_definition.user_defined_types.get(&child_type_name) {
+                                if let Some(sd) = doc.user_definitions.user_defined_types.get(&child_type_name) {
                                     let md = format!("## User-Defined Type\n```\n{}\n```", sd.udt_format);
                                     return Ok(Some(Hover {
                                         contents: HoverContents::Markup(MarkupContent {
@@ -259,7 +312,7 @@ impl LanguageServer for Backend {
                         }
                         if !variable_name.is_empty() {
                             if let Some(struct_type_name) = doc.cached_typed_vars.get(&variable_name) {
-                                if let Some(udt) = doc.user_definition.user_defined_types.get(&struct_type_name.clone()) {
+                                if let Some(udt) = doc.user_definitions.user_defined_types.get(&struct_type_name.clone()) {
                                     if let Some(ref members) = udt.udt_members {
                                         let items: Vec<CompletionItem> = members
                                             .iter()
@@ -296,7 +349,7 @@ impl LanguageServer for Backend {
                                         let mut v = HashSet::new();
                                         let types = vec!["a", "i", "k", "b", "S", "f", "w", "InstrDef", "Instr", "Opcode", "Complex"];
                                         v.extend(types);
-                                        for (_, udt) in doc.user_definition.user_defined_types.iter() {
+                                        for (_, udt) in doc.user_definitions.user_defined_types.iter() {
                                             v.insert(udt.udt_name.as_str());
                                         }
 
@@ -316,11 +369,42 @@ impl LanguageServer for Backend {
                                             .collect();
                                         return Ok(Some(CompletionResponse::Array(items)))
                                     },
+                                    "$" => {
+                                        let mut items = Vec::new();
+                                        for (_, value) in doc.user_definitions.user_defined_macros.iter() {
+                                            items.push(CompletionItem {
+                                                label: value.macro_label.clone(),
+                                                kind: Some(CompletionItemKind::FIELD),
+                                                detail: Some(format!("# {} #", value.macro_values)),
+                                                insert_text: Some(value.macro_name.clone()),
+                                                documentation: Some(Documentation::String("user defined macro".to_string())),
+                                                ..Default::default()
+                                                }
+                                            );
+                                        }
+                                        if let Some(omacros) = &self.json_reference_completion_list.omacros_data {
+                                            for (omacro, macro_value) in omacros {
+                                                items.push(CompletionItem {
+                                                    label: omacro.clone(),
+                                                    kind: Some(CompletionItemKind::FIELD),
+                                                    detail: Some(format!("value: {}", macro_value.value)),
+                                                    insert_text: Some(omacro.clone()),
+                                                    documentation: Some(Documentation::String(format!("equivalent to: {}", macro_value.equivalent_to))),
+                                                    ..Default::default()
+                                                    }
+                                                );
+                                            }
+                                        }
+                                        if !items.is_empty() {
+                                            return Ok(Some(CompletionResponse::Array(items)))
+                                        }
+                                        return Ok(None)
+                                    },
                                     _ => {
                                         if let Some(p) = wnode.parent() {
                                             let pkind = p.kind();
                                             if pkind != "modern_udo_inputs" && wnode.kind() != "legacy_udo_args" {
-                                                if let Some(ref list) = self.opcode_completion_list {
+                                                if let Some(ref list) = self.json_reference_completion_list.opcodes_data {
                                                     let mut items = Vec::new();
                                                     for (n, data) in list {
                                                         if n.starts_with(&op_name) {
