@@ -1,15 +1,47 @@
 #![allow(unused)]
 
-use rust_embed::{EmbeddedFile, RustEmbed};
+use rust_embed::{ EmbeddedFile, RustEmbed };
 use tower_lsp::lsp_types::lsif::ItemKind;
-use tower_lsp::lsp_types::{ Position, Range, Diagnostic };
-use tree_sitter::{ Node, Parser, Point, Tree };
+use tower_lsp::lsp_types::{
+    Position,
+    Range,
+    Diagnostic,
+    SemanticTokenType,
+    SemanticToken,
+    SemanticTokensResult,
+    SemanticTokens,
+    SemanticTokensLegend,
+    SemanticTokenModifier
+};
+use tree_sitter::{ Node, Parser, Point, Tree, Query, QueryCursor, StreamingIterator };
 use std::fmt::{ Display, Formatter };
 use std::fmt;
 use std::path::Path;
 use std::collections::{ HashMap, HashSet };
 use serde::Deserialize;
-use tree_sitter_csound::LANGUAGE;
+use tree_sitter_csound::{ LANGUAGE, HIGHLIGHTS_QUERY };
+
+pub const SEMANTIC_TOKENS: &[SemanticTokenType] = &[
+    SemanticTokenType::VARIABLE,
+    SemanticTokenType::PARAMETER,
+    SemanticTokenType::NUMBER,
+    SemanticTokenType::STRING,
+    SemanticTokenType::MACRO,
+    SemanticTokenType::TYPE,
+    SemanticTokenType::FUNCTION,
+    SemanticTokenType::COMMENT,
+    SemanticTokenType::KEYWORD,
+    SemanticTokenType::PROPERTY,
+    SemanticTokenType::NAMESPACE,
+    SemanticTokenType::OPERATOR
+];
+
+pub fn get_token_lengend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: SEMANTIC_TOKENS.to_vec(),
+        token_modifiers: vec![SemanticTokenModifier::DECLARATION]
+    }
+}
 
 #[derive(RustEmbed)]
 #[folder = "csound_data"]
@@ -19,11 +51,18 @@ struct AssetCsoundOpcodeCompletion;
 #[folder = "csound_data/opcodes"]
 struct AssetCsoundOpcodeReferences;
 
-pub fn parse_doc(text: &str) -> Tree {
+#[derive(Debug)]
+pub struct ParesedTree {
+    pub tree: Tree,
+    pub query: Query
+}
+
+pub fn parse_doc(text: &str) -> ParesedTree {
     let mut p = Parser::new();
     let language = LANGUAGE.into();
     p.set_language(&language).unwrap();
-    p.parse(text, None).unwrap()
+    let query = Query::new(&LANGUAGE.into(), HIGHLIGHTS_QUERY).unwrap();
+    ParesedTree { tree: p.parse(text, None).unwrap(), query }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -103,7 +142,8 @@ fn has_ancestor_of_kind(node: Node, kind: &str) -> bool {
 #[derive(Debug)]
 pub enum GErrors {
     Syntax,
-    ExplicitType
+    ExplicitType,
+    ScoreStatement
 }
 
 #[derive(Debug)]
@@ -120,7 +160,7 @@ pub struct NodeCollects<'a> {
     pub generic_errors: Vec<GenericError<'a>>,
     pub udt: HashSet<String>,
     pub typed_vars: HashMap<String, String>,
-    pub user_definitions: UserDefinitions
+    pub user_definitions: UserDefinitions,
 }
 
 impl<'a> NodeCollects<'a> {
@@ -132,7 +172,7 @@ impl<'a> NodeCollects<'a> {
             generic_errors: Vec::new(),
             udt: HashSet::new(),
             typed_vars: HashMap::new(),
-            user_definitions: UserDefinitions::new()
+            user_definitions: UserDefinitions::new(),
         }
     }
 }
@@ -520,18 +560,17 @@ pub fn iterate_tree<'a>(
                 let parent = node.parent();
                 let should_skip = parent.map(|p| {
                     let pk = p.kind();
+                    pk == "ERROR"                   ||
                     pk == "typed_identifier"        ||
                     pk == "global_typed_identifier" ||
                     pk == "struct_definition"       ||
                     pk == "label_statement"         ||
-                    pk == "macro_define"            ||
-                    pk == "macro_name"              ||
-                    pk == "macro_usage"             ||
-                    pk == "score_nestable_loop"     ||
-                    pk == "score_body"              ||
-                    (pk == "struct_access" && p.child_by_field_name("member").map(|m| m.id() == node.id()).unwrap_or(false))  ||
+                    pk == "macro_name"              || pk == "macro_usage"           || pk == "macro_define"          ||
+                    pk == "score_body"              || pk == "score_nestable_loop"   || pk == "score_field"           ||
+                    pk == "score_statement_func"    || pk == "score_statement_instr" || pk == "score_statement_group" ||
+                    (pk == "struct_access"    && p.child_by_field_name("member").map(|m| m.id() == node.id()).unwrap_or(false))  ||
                     (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false)) ||
-                    (pk == "function_call" && p.child_by_field_name("function").map(|f| f.id() == node.id()).unwrap_or(false))
+                    (pk == "function_call"    && p.child_by_field_name("function").map(|f| f.id() == node.id()).unwrap_or(false))
                 }).unwrap_or(false);
 
                 if !should_skip {
@@ -633,6 +672,12 @@ pub fn iterate_tree<'a>(
                             nodes_to_diagnostics.generic_errors.push(GenericError {
                                     node: node,
                                     error_type: GErrors::ExplicitType
+                                }
+                            );
+                        } else if current_parent_kind.starts_with("score_") {
+                            nodes_to_diagnostics.generic_errors.push(GenericError {
+                                    node: node,
+                                    error_type: GErrors::ScoreStatement
                                 }
                             );
                         } else {
@@ -803,4 +848,75 @@ pub fn load_opcodes() -> HashMap<String, String> {
         }
     }
     map
+}
+
+fn capture_to_token_type(capture: &str) -> Option<SemanticTokenType> {
+    match capture {
+        "variable" | "label" => Some(SemanticTokenType::VARIABLE),
+        "variable.parameter" => Some(SemanticTokenType::PARAMETER),
+        "constant.numeric" | "constant" => Some(SemanticTokenType::NUMBER),
+        "string" | "string.special" => Some(SemanticTokenType::STRING),
+        "macro" => Some(SemanticTokenType::MACRO),
+        "type" => Some(SemanticTokenType::TYPE),
+        "function" | "entity.name.function" => Some(SemanticTokenType::FUNCTION),
+        "comment" => Some(SemanticTokenType::COMMENT),
+        "keyword" => Some(SemanticTokenType::KEYWORD),
+        "property" => Some(SemanticTokenType::PROPERTY),
+        "tag" => Some(SemanticTokenType::NAMESPACE),
+        "operator" | "punctuation.delimiter" | "punctuation.bracket" => Some(SemanticTokenType::OPERATOR),
+        _ => None,
+    }
+}
+
+pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String) -> Vec<SemanticToken> {
+    let mut stokens: Vec<SemanticToken> = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut qmatches = cursor.matches(&query, tree.root_node(), text.as_bytes());
+    let mut tokens: Vec<(u32, u32, u32, u32)> = Vec::new(); // (line, col, length, type)
+
+    let mut prev_line = 0u32;
+    let mut prev_start = 0u32;
+    while let Some(m) = qmatches.next() {
+        for capture in m.captures {
+            let capture_name = &query.capture_names()[capture.index as usize];
+            if let Some(token_type) = capture_to_token_type(&capture_name) {
+                let start_position = capture.node.start_position();
+                let end_position = capture.node.end_position();
+
+                let length = (capture.node.end_byte() - capture.node.start_byte()) as u32;
+                let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap() as u32;
+
+                tokens.push((
+                    start_position.row as u32,
+                    start_position.column as u32,
+                    length,
+                    ttype
+                ));
+            }
+        }
+    }
+
+    tokens.sort_by(|a, b| { if a.0 == b.0 { a.1.cmp(&b.1) } else { a.0.cmp(&b.0) }});
+
+    for (line, col, length, ttype) in tokens {
+        let delta_line = line - prev_line;
+        let delta_start = if delta_line == 0 {
+            col - prev_start
+        } else {
+            col
+        };
+
+        stokens.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type: ttype,
+            token_modifiers_bitset: 0,
+        });
+
+        prev_line = line;
+        prev_start = col;
+    }
+
+    stokens
 }

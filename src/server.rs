@@ -3,7 +3,7 @@ use crate::parser;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{ Client, LanguageServer };
-use tree_sitter::Tree;
+use tree_sitter::{ Tree, Query };
 use std::collections::{ HashMap, HashSet };
 use tokio::sync::RwLock;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use std::sync::Arc;
 pub struct CurrentDocument {
     pub text: String,
     pub tree: Tree,
+    pub query: Query,
     pub user_definitions: parser::UserDefinitions,
     pub cached_typed_vars: HashMap<String, String>
 }
@@ -52,6 +53,13 @@ impl LanguageServer for Backend {
                     all_commit_characters: None,
                     ..Default::default()
                 }),
+                semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+                    SemanticTokensOptions {
+                        legend: parser::get_token_lengend(),
+                        full: Some(SemanticTokensFullOptions::Bool(true)),
+                        ..Default::default()
+                    }
+                )),
                 ..Default::default()
             },
             ..Default::default()
@@ -68,17 +76,17 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        let tree = parser::parse_doc(&text);
+        let parsed_tree = parser::parse_doc(&text);
         let mut d = self.document_state.write().await;
         d.insert(
             uri,
             CurrentDocument {
                 text,
-                tree,
+                tree: parsed_tree.tree,
+                query: parsed_tree.query,
                 user_definitions: parser::UserDefinitions::new(),
                 cached_typed_vars: HashMap::new()
             }
@@ -100,24 +108,18 @@ impl LanguageServer for Backend {
 
             if let Some(doc) = d.get_mut(&uri) {
                 let text = current_change.text;
-                let tree = parser::parse_doc(&text);
+                let parses_tree = parser::parse_doc(&text);
                 doc.text = text.clone();
-                doc.tree = tree;
+                doc.tree = parses_tree.tree;
+                doc.query = parses_tree.query;
                 let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text);
                 doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
                 doc.user_definitions = nodes_to_diagnostics.user_definitions;
 
+                parser::get_semantic_tokens(&doc.query, &doc.tree, &text);
+
                 for var in &doc.user_definitions.unused_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
-
-                        self.client.log_message(MessageType::INFO,
-                            format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
-                            finded_node.kind(),
-                            finded_node.parent().unwrap().kind(),
-                            var.var_name,
-                            var.var_calls,
-                            var.var_scope
-                        )).await;
 
                         let diag = Diagnostic {
                             range: parser::get_node_range(&finded_node),
@@ -134,15 +136,6 @@ impl LanguageServer for Backend {
 
                 for var in &doc.user_definitions.undefined_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
-
-                        self.client.log_message(MessageType::INFO,
-                                format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
-                            finded_node.kind(),
-                            finded_node.parent().unwrap().kind(),
-                            var.var_name,
-                            var.var_calls,
-                            var.var_scope
-                        )).await;
 
                         for node_range in &var.references {
                             let diag = Diagnostic {
@@ -204,7 +197,10 @@ impl LanguageServer for Backend {
                             format!("Syntax error: <{}>", node_name)
                         },
                         parser::GErrors::ExplicitType => {
-                            format!("Generic error, unknown Type identifier: <{}>", node_name)
+                            format!("Unknown type identifier: <{}>", node_name)
+                        },
+                        parser::GErrors::ScoreStatement => {
+                            format!("Unknown score statement")
                         }
                     };
                     let diag = Diagnostic {
@@ -233,14 +229,6 @@ impl LanguageServer for Backend {
             if let Some(node) = parser::find_node_at_position(&doc.tree, &pos) {
                 let node_kind = node.kind();
                 let node_type = node.utf8_text(doc.text.as_bytes()).unwrap_or("???"); // opcode key
-
-                self.client.log_message(MessageType::INFO,
-                    format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}",
-                    node_kind,
-                    parser::get_node_name(node, &doc.text).unwrap_or_default(),
-                    node.parent().map(|p| p.kind()).unwrap_or("None"),
-                    parser::find_scope(node, &doc.text)
-                )).await;
 
                 match node_kind {
                     "opcode_name" => {
@@ -452,5 +440,17 @@ impl LanguageServer for Backend {
             return Ok(None)
         }
         return Ok(None)
+    }
+
+    async fn semantic_tokens_full(&self, params: SemanticTokensParams) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let dc = self.document_state.read().await;
+        if let Some(doc) = dc.get(&uri) {
+            let st = parser::get_semantic_tokens(&doc.query, &doc.tree, &doc.text);
+            return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens{
+                result_id: None, data: st
+            })))
+        }
+        Ok(None)
     }
 }
