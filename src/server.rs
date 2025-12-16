@@ -135,7 +135,7 @@ impl LanguageServer for Backend {
                 }
 
                 for var in &doc.user_definitions.undefined_vars {
-                    if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
+                    if let Some(_) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
 
                         for node_range in &var.references {
                             let diag = Diagnostic {
