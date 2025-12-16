@@ -19,7 +19,10 @@ use std::fmt;
 use std::path::Path;
 use std::collections::{ HashMap, HashSet };
 use serde::Deserialize;
-use tree_sitter_csound::{ LANGUAGE, HIGHLIGHTS_QUERY };
+use tree_sitter_csound::{
+    LANGUAGE,
+    HIGHLIGHTS_QUERY
+};
 
 pub const SEMANTIC_TOKENS: &[SemanticTokenType] = &[
     SemanticTokenType::VARIABLE,
