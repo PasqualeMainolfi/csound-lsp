@@ -48,7 +48,7 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
-                    trigger_characters: Some(vec![".".to_string(), ":".to_string(), "$".to_string() ]),
+                    trigger_characters: Some(vec![".".to_string(), ":".to_string(), "$".to_string(), "-".to_string()]),
                     work_done_progress_options: Default::default(),
                     all_commit_characters: None,
                     ..Default::default()
@@ -121,11 +121,21 @@ impl LanguageServer for Backend {
                 for var in &doc.user_definitions.unused_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
 
+                        self.client.log_message(MessageType::INFO,
+                            format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
+                            finded_node.kind(),
+                            finded_node.parent().unwrap().kind(),
+                            var.var_name,
+                            var.var_calls,
+                            var.var_scope
+                        )).await;
+
                         let diag = Diagnostic {
                             range: parser::get_node_range(&finded_node),
-                            severity: Some(DiagnosticSeverity::WARNING),
+                            severity: Some(DiagnosticSeverity::HINT),
                             source: Some("csound-lsp".into()),
                             message: "Unused variable".to_string(),
+                            tags: Some(vec![DiagnosticTag::UNNECESSARY]),
                             ..Default::default()
                         };
                         if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
@@ -135,7 +145,16 @@ impl LanguageServer for Backend {
                 }
 
                 for var in &doc.user_definitions.undefined_vars {
-                    if let Some(_) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
+                    if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
+
+                        self.client.log_message(MessageType::INFO,
+                                format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
+                            finded_node.kind(),
+                            finded_node.parent().unwrap().kind(),
+                            var.var_name,
+                            var.var_calls,
+                            var.var_scope
+                        )).await;
 
                         for node_range in &var.references {
                             let diag = Diagnostic {
@@ -229,6 +248,14 @@ impl LanguageServer for Backend {
             if let Some(node) = parser::find_node_at_position(&doc.tree, &pos) {
                 let node_kind = node.kind();
                 let node_type = node.utf8_text(doc.text.as_bytes()).unwrap_or("???"); // opcode key
+
+                self.client.log_message(MessageType::INFO,
+                    format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}",
+                    node_kind,
+                    parser::get_node_name(node, &doc.text).unwrap_or_default(),
+                    node.parent().map(|p| p.kind()).unwrap_or("None"),
+                    parser::find_scope(node, &doc.text)
+                )).await;
 
                 match node_kind {
                     "opcode_name" => {
@@ -388,19 +415,34 @@ impl LanguageServer for Backend {
                                         }
                                         return Ok(None)
                                     },
+                                    "flag_identifier" => {
+                                        if let Some(ref list) = self.json_reference_completion_list.oflag_data {
+                                            let mut items = Vec::new();
+                                            for (_, data) in list {
+                                                let data_body = data.get_string_from_body();
+                                                let slice_body: String = String::from(&data_body[1..]);
+                                                items.push(CompletionItem {
+                                                    label: data.prefix.clone(),
+                                                    kind: Some(CompletionItemKind::FIELD),
+                                                    insert_text: Some(slice_body),
+                                                    documentation: Some(Documentation::String(format!("{}", data.description))),
+                                                    ..Default::default()
+                                                    }
+                                                )
+                                            }
+                                            return Ok(Some(CompletionResponse::Array(items)))
+                                        }
+                                        return Ok(None)
+                                    }
                                     _ => {
                                         if let Some(p) = wnode.parent() {
                                             let pkind = p.kind();
-                                            if pkind != "modern_udo_inputs" && wnode.kind() != "legacy_udo_args" {
+                                            if pkind != "modern_udo_inputs" && wnode.kind() != "legacy_udo_args" && pkind != "flag_content" {
                                                 if let Some(ref list) = self.json_reference_completion_list.opcodes_data {
                                                     let mut items = Vec::new();
                                                     for (n, data) in list {
                                                         if n.starts_with(&op_name) {
-                                                            let data_body = match &data.body {
-                                                                parser::BodyOpCompletion::SingleLine(s) => s.clone(),
-                                                                parser::BodyOpCompletion::MultipleLine(arr) => arr.join("\n")
-                                                            };
-
+                                                            let data_body = data.get_string_from_body();
                                                             let is_snip = data_body.contains("$");
 
                                                             items.push(CompletionItem {
@@ -446,9 +488,11 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         let dc = self.document_state.read().await;
         if let Some(doc) = dc.get(&uri) {
-            let st = parser::get_semantic_tokens(&doc.query, &doc.tree, &doc.text);
+            let mut st = parser::get_semantic_tokens(&doc.query, &doc.tree, &doc.text);
+            let stokens = parser::get_delta_pos(&mut st);
+
             return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens{
-                result_id: None, data: st
+                result_id: None, data: stokens
             })))
         }
         Ok(None)

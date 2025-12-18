@@ -19,10 +19,7 @@ use std::fmt;
 use std::path::Path;
 use std::collections::{ HashMap, HashSet };
 use serde::Deserialize;
-use tree_sitter_csound::{
-    LANGUAGE,
-    HIGHLIGHTS_QUERY
-};
+use tree_sitter_csound::{ LANGUAGE, HIGHLIGHTS_QUERY };
 
 pub const SEMANTIC_TOKENS: &[SemanticTokenType] = &[
     SemanticTokenType::VARIABLE,
@@ -82,6 +79,15 @@ pub struct OpcodesData {
     pub description: String
 }
 
+impl OpcodesData {
+    pub fn get_string_from_body(&self) -> String {
+        match &self.body {
+            BodyOpCompletion::SingleLine(s) => s.clone(),
+            BodyOpCompletion::MultipleLine(arr) => arr.join("\n")
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 pub struct OMacro {
     pub value: String,
@@ -91,21 +97,27 @@ pub struct OMacro {
 #[derive(Debug)]
 pub struct CsoundJsonData {
     pub opcodes_data: Option<HashMap<String, OpcodesData>>,
-    pub omacros_data: Option<HashMap<String, OMacro>>
+    pub omacros_data: Option<HashMap<String, OMacro>>,
+    pub oflag_data: Option<HashMap<String, OpcodesData>>
+}
+
+fn open_json_data(data: &str) -> Option<EmbeddedFile> {
+    match AssetCsoundOpcodeCompletion::get(data) {
+        Some(c) => Some(c),
+        None => None
+    }
 }
 
 pub fn read_csound_json_data() -> CsoundJsonData {
-    let mut cj: CsoundJsonData = CsoundJsonData{ opcodes_data: None, omacros_data: None };
-
-    let opfile: Option<EmbeddedFile> = match AssetCsoundOpcodeCompletion::get("csound.json") {
-        Some(c) => Some(c),
-        None => None
+    let mut cj: CsoundJsonData = CsoundJsonData{
+        opcodes_data: None,
+        omacros_data: None,
+        oflag_data: None
     };
 
-    let omfile: Option<EmbeddedFile> = match AssetCsoundOpcodeCompletion::get("omacro.json") {
-        Some(c) => Some(c),
-        None => None
-    };
+    let opfile = open_json_data("csound.json");
+    let omfile = open_json_data("omacro.json");
+    let offile = open_json_data("oflag.json");
 
     if let Some(f) = opfile {
         let content = std::str::from_utf8(f.data.as_ref()).unwrap_or("");
@@ -128,6 +140,18 @@ pub fn read_csound_json_data() -> CsoundJsonData {
             }
         };
     }
+
+    if let Some(f) = offile {
+        let content = std::str::from_utf8(f.data.as_ref()).unwrap_or("");
+        cj.oflag_data = match serde_json::from_str::<HashMap<String, OpcodesData>>(&content) {
+            Ok(map) => Some(map),
+            Err(e) => {
+                eprintln!("ERROR: Could not parse flag JSON: {}", e);
+                None
+            }
+        };
+    }
+
     cj
 }
 
@@ -568,6 +592,7 @@ pub fn iterate_tree<'a>(
                     pk == "global_typed_identifier" ||
                     pk == "struct_definition"       ||
                     pk == "label_statement"         ||
+                    pk == "flag_content"            ||
                     pk == "macro_name"              || pk == "macro_usage"           || pk == "macro_define"          ||
                     pk == "score_body"              || pk == "score_nestable_loop"   || pk == "score_field"           ||
                     pk == "score_statement_func"    || pk == "score_statement_instr" || pk == "score_statement_group" ||
@@ -670,7 +695,14 @@ pub fn iterate_tree<'a>(
                         .map(|p| p.kind())
                         .unwrap_or("");
 
-                    if current_parent_kind != "modern_udo_outputs" && (!trim_name.contains(")") && !trim_name.contains(",") && !trim_name.contains("]")) {
+                    let condition = {
+                        !trim_name.contains(")") &&
+                        !trim_name.contains(",") &&
+                        !trim_name.contains("]") &&
+                        !trim_name.contains("<")
+                    };
+
+                    if current_parent_kind != "modern_udo_outputs" && condition {
                         if trim_name.len() == 1 || trim_name.contains(":") {
                             nodes_to_diagnostics.generic_errors.push(GenericError {
                                     node: node,
@@ -871,20 +903,17 @@ fn capture_to_token_type(capture: &str) -> Option<SemanticTokenType> {
     }
 }
 
-pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String) -> Vec<SemanticToken> {
-    let mut stokens: Vec<SemanticToken> = Vec::new();
+pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String) -> Vec<(u32, u32, u32, u32, u32)> {
     let mut cursor = QueryCursor::new();
     let mut qmatches = cursor.matches(&query, tree.root_node(), text.as_bytes());
-    let mut tokens: Vec<(u32, u32, u32, u32)> = Vec::new(); // (line, col, length, type)
+    let mut tokens: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // (line, col, length, type)
 
-    let mut prev_line = 0u32;
-    let mut prev_start = 0u32;
     while let Some(m) = qmatches.next() {
         for capture in m.captures {
             let capture_name = &query.capture_names()[capture.index as usize];
             if let Some(token_type) = capture_to_token_type(&capture_name) {
                 let start_position = capture.node.start_position();
-                let end_position = capture.node.end_position();
+                // let end_position = capture.node.end_position();
 
                 let length = (capture.node.end_byte() - capture.node.start_byte()) as u32;
                 let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap() as u32;
@@ -893,33 +922,39 @@ pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String) -> Vec<Sem
                     start_position.row as u32,
                     start_position.column as u32,
                     length,
-                    ttype
+                    ttype,
+                    0
                 ));
             }
         }
     }
+    tokens
+}
 
-    tokens.sort_by(|a, b| { if a.0 == b.0 { a.1.cmp(&b.1) } else { a.0.cmp(&b.0) }});
+pub fn get_delta_pos(semantic_tokens: &mut Vec<(u32, u32, u32, u32, u32)>) -> Vec<SemanticToken> {
+    semantic_tokens.sort_by(|a, b| { if a.0 == b.0 { a.1.cmp(&b.1) } else { a.0.cmp(&b.0) }});
+    let mut stokens = Vec::new();
 
-    for (line, col, length, ttype) in tokens {
-        let delta_line = line - prev_line;
+    let mut prev_line = 0u32;
+    let mut prev_start = 0u32;
+    for (line, col, length, ttype, bitmask) in semantic_tokens {
+        let delta_line = *line - prev_line;
         let delta_start = if delta_line == 0 {
-            col - prev_start
+            *col - prev_start
         } else {
-            col
+            *col
         };
 
         stokens.push(SemanticToken {
             delta_line,
             delta_start,
-            length,
-            token_type: ttype,
-            token_modifiers_bitset: 0,
+            length: *length,
+            token_type: *ttype,
+            token_modifiers_bitset: *bitmask,
         });
 
-        prev_line = line;
-        prev_start = col;
+        prev_line = *line;
+        prev_start = *col;
     }
-
     stokens
 }
