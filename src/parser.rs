@@ -591,7 +591,6 @@ pub fn iterate_tree<'a>(
                     pk == "typed_identifier"            ||
                     pk == "global_typed_identifier"     ||
                     pk == "struct_definition"           ||
-                    pk == "for_loop"                    ||
                     pk == "label_statement"             ||
                     pk == "flag_content"                ||
                     pk == "file_score_body"             ||
@@ -842,7 +841,7 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
 
         let p_kind = parent.kind();
 
-        if p_kind == "xin_statement" || p_kind == "modern_udo_inputs" { return AccessVariableType::Write; }
+        if p_kind == "xin_statement" || p_kind == "modern_udo_inputs" || p_kind == "for_loop" { return AccessVariableType::Write; }
 
         if p_kind.contains("assignment_statement") {
             if let Some(left) = parent.child_by_field_name("left") {
