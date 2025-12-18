@@ -591,6 +591,7 @@ pub fn iterate_tree<'a>(
                     pk == "typed_identifier"            ||
                     pk == "global_typed_identifier"     ||
                     pk == "struct_definition"           ||
+                    pk == "for_loop"                    ||
                     pk == "label_statement"             ||
                     pk == "flag_content"                ||
                     pk == "file_score_body"             ||
