@@ -13,6 +13,7 @@ use tower_lsp::lsp_types::{
     SemanticTokensLegend,
     SemanticTokenModifier
 };
+
 use tree_sitter::{ Node, Parser, Point, Tree, Query, QueryCursor, StreamingIterator };
 use std::fmt::{ Display, Formatter };
 use std::fmt;
