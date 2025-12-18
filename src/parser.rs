@@ -587,17 +587,28 @@ pub fn iterate_tree<'a>(
                 let parent = node.parent();
                 let should_skip = parent.map(|p| {
                     let pk = p.kind();
-                    pk == "ERROR"                   ||
-                    pk == "typed_identifier"        ||
-                    pk == "global_typed_identifier" ||
-                    pk == "struct_definition"       ||
-                    pk == "label_statement"         ||
-                    pk == "flag_content"            ||
-                    pk == "macro_name"              || pk == "macro_usage"           || pk == "macro_define"          ||
-                    pk == "score_body"              || pk == "score_nestable_loop"   || pk == "score_field"           ||
-                    pk == "score_statement_func"    || pk == "score_statement_instr" || pk == "score_statement_group" ||
-                    (pk == "struct_access"    && p.child_by_field_name("member").map(|m| m.id() == node.id()).unwrap_or(false))  ||
-                    (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false)) ||
+                    pk == "ERROR"                       ||
+                    pk == "typed_identifier"            ||
+                    pk == "global_typed_identifier"     ||
+                    pk == "struct_definition"           ||
+                    pk == "label_statement"             ||
+                    pk == "flag_content"                ||
+                    pk == "file_score_body"             ||
+                    pk == "file_score_nestable_loop"    ||
+                    pk == "macro_name"                  ||
+                    pk == "macro_usage"                 ||
+                    pk == "macro_define"                ||
+                    pk == "score_body"                  ||
+                    pk == "score_nestable_loop"         ||
+                    pk == "score_field"                 ||
+                    pk == "score_statement_func"        ||
+                    pk == "score_statement_instr"       ||
+                    pk == "score_statement_group"       ||
+                    pk == "file_score_statement_func"   ||
+                    pk == "file_score_statement_instr"  ||
+                    pk == "file_score_statement_group"  ||
+                    (pk == "struct_access"    && p.child_by_field_name("member").map(|m| m.id() == node.id()).unwrap_or(false)) ||
+                    (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))   ||
                     (pk == "function_call"    && p.child_by_field_name("function").map(|f| f.id() == node.id()).unwrap_or(false))
                 }).unwrap_or(false);
 
