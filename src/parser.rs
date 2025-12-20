@@ -36,6 +36,22 @@ pub const SEMANTIC_TOKENS: &[SemanticTokenType] = &[
     SemanticTokenType::OPERATOR
 ];
 
+pub const OMACROS: [&'static str; 13] = [
+    "M_E",
+    "MLOG2E",
+    "M_LOG10E",
+    "M_LN2",
+    "M_LN10",
+    "M_PI",
+    "M_PI_2",
+    "M_PI_4",
+    "M_1_PI",
+    "M_2_PI",
+    "M_2_SQRTPI",
+    "M_SQRT2",
+    "M_SQRT1_2"
+];
+
 pub fn get_token_lengend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: SEMANTIC_TOKENS.to_vec(),
@@ -355,26 +371,35 @@ impl UserDefinitions {
         }
 
         if !found {
-            let is_write = access_type == AccessVariableType::Write;
             let mut udv = UserDefinedVariable {
                 node_location: node.start_byte(),
                 var_name: key.clone(),
                 var_scope: preferred_scope.clone(),
                 var_calls: 1,
-                is_undefined: !is_write,
-                is_unused: is_write,
+                is_undefined: false,
+                is_unused: false,
                 references: Vec::new()
             };
 
-            if !is_write { udv.references.push(get_node_range(&node)); }
-
-            if preferred_scope == Scope::Global {
+            if OMACROS.contains(&key.as_str()) {
+                udv.var_scope = Scope::Global;
+                udv.var_calls = 2;
                 self.global_defined_vars.insert(key.clone(), udv);
             } else {
-                self.local_defined_vars
-                    .entry(preferred_scope)
-                    .or_insert_with(HashMap::new)
-                    .insert(key.clone(), udv);
+                let is_write = access_type == AccessVariableType::Write;
+                udv.is_undefined = !is_write;
+                udv.is_unused = is_write;
+
+                if !is_write { udv.references.push(get_node_range(&node)); }
+
+                if preferred_scope == Scope::Global {
+                    self.global_defined_vars.insert(key.clone(), udv);
+                } else {
+                    self.local_defined_vars
+                        .entry(preferred_scope)
+                        .or_insert_with(HashMap::new)
+                        .insert(key.clone(), udv);
+                }
             }
         }
     }
@@ -593,22 +618,9 @@ pub fn iterate_tree<'a>(
                     pk == "struct_definition"           ||
                     pk == "label_statement"             ||
                     pk == "flag_content"                ||
-                    pk == "file_score_body"             ||
-                    pk == "file_score_nestable_loop"    ||
-                    pk == "macro_name"                  ||
-                    pk == "macro_usage"                 ||
-                    pk == "macro_define"                ||
-                    pk == "score_body"                  ||
-                    pk == "score_nestable_loop"         ||
-                    pk == "score_field"                 ||
-                    pk == "score_statement_func"        ||
-                    pk == "score_statement_instr"       ||
-                    pk == "score_statement_group"       ||
-                    pk == "file_score_statement_func"   ||
-                    pk == "file_score_statement_instr"  ||
-                    pk == "file_score_statement_group"  ||
-                    (pk == "struct_access"    && p.child_by_field_name("member").map(|m| m.id() == node.id()).unwrap_or(false)) ||
-                    (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))   ||
+                    (pk == "struct_access"    && p.child_by_field_name("member").map(|m| m.id() == node.id()).unwrap_or(false))     ||
+                    (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))       ||
+                    (pk == "opcode_statement" && p.child_by_field_name("op_macro").map(|op| op.id() == node.id()).unwrap_or(false)) ||
                     (pk == "function_call"    && p.child_by_field_name("function").map(|f| f.id() == node.id()).unwrap_or(false))
                 }).unwrap_or(false);
 
@@ -841,7 +853,10 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
 
         let p_kind = parent.kind();
 
-        if p_kind == "xin_statement" || p_kind == "modern_udo_inputs" || p_kind == "for_loop" { return AccessVariableType::Write; }
+        if p_kind == "xin_statement"            || p_kind == "modern_udo_inputs"   ||
+           p_kind == "for_loop"                 || p_kind == "score_nestable_loop" ||
+           p_kind == "file_score_nestable_loop" || p_kind == "macro_name"
+        { return AccessVariableType::Write; }
 
         if p_kind.contains("assignment_statement") {
             if let Some(left) = parent.child_by_field_name("left") {
@@ -860,7 +875,7 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
         }
 
         if p_kind == "opcode_statement" {
-            if let Some(op_node) = parent.child_by_field_name("op") {
+            if let Some(op_node) = parent.child_by_field_name("op").or_else(|| parent.child_by_field_name("op_macro")) {
                 if current_node.end_byte() <= op_node.start_byte() {
                     return AccessVariableType::Write;
                 }
@@ -898,18 +913,24 @@ pub fn load_opcodes() -> HashMap<String, String> {
 
 fn capture_to_token_type(capture: &str) -> Option<SemanticTokenType> {
     match capture {
-        "variable" | "label" => Some(SemanticTokenType::VARIABLE),
-        "variable.parameter" => Some(SemanticTokenType::PARAMETER),
-        "constant.numeric" | "constant" => Some(SemanticTokenType::NUMBER),
-        "string" | "string.special" => Some(SemanticTokenType::STRING),
-        "macro" => Some(SemanticTokenType::MACRO),
-        "type" => Some(SemanticTokenType::TYPE),
-        "function" | "entity.name.function" => Some(SemanticTokenType::FUNCTION),
-        "comment" => Some(SemanticTokenType::COMMENT),
-        "keyword" => Some(SemanticTokenType::KEYWORD),
-        "property" => Some(SemanticTokenType::PROPERTY),
-        "tag" => Some(SemanticTokenType::NAMESPACE),
-        "operator" | "punctuation.delimiter" | "punctuation.bracket" => Some(SemanticTokenType::OPERATOR),
+        "variable.parameter"        => Some(SemanticTokenType::PARAMETER),
+        "macro"                     => Some(SemanticTokenType::MACRO),
+        "type"                      => Some(SemanticTokenType::TYPE),
+        "comment"                   => Some(SemanticTokenType::COMMENT),
+        "keyword"                   => Some(SemanticTokenType::KEYWORD),
+        "property"                  => Some(SemanticTokenType::PROPERTY),
+        "tag"                       => Some(SemanticTokenType::NAMESPACE),
+        "variable" |
+        "label"                     => Some(SemanticTokenType::VARIABLE),
+        "string" |
+        "string.special"            => Some(SemanticTokenType::STRING),
+        "constant.numeric" |
+        "constant"                  => Some(SemanticTokenType::NUMBER),
+        "function" |
+        "entity.name.function"      => Some(SemanticTokenType::FUNCTION),
+        "operator"              |
+        "punctuation.delimiter" |
+        "punctuation.bracket"       => Some(SemanticTokenType::OPERATOR),
         _ => None,
     }
 }
