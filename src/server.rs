@@ -172,7 +172,8 @@ impl LanguageServer for Backend {
                 }
 
                 for node in nodes_to_diagnostics.opcodes {
-                    if let Some(node_type) = parser::get_node_name(node, &doc.text){
+                    if let Some(nt) = parser::get_node_name(node, &doc.text) {
+                        let node_type = nt.split_once(":").map(|(prefix, _)| prefix.to_string()).unwrap_or(nt);
                         if !nodes_to_diagnostics.udo.contains(&node_type) && !nodes_to_diagnostics.udt.contains(&node_type) {
                             match self.opcodes.get(&node_type) {
                                 Some(_) => {},
@@ -302,7 +303,20 @@ impl LanguageServer for Backend {
                                         })
                                     )
                                 }
+
+                                let splitted_name = node_type.split_once(":").map(|(p, _)| p).unwrap_or(node_type);
+                                if let Some(reference) = self.opcodes.get(splitted_name) {
+                                    return Ok(Some(Hover {
+                                        contents: HoverContents::Markup(MarkupContent {
+                                                kind: MarkupKind::Markdown,
+                                                value: reference.clone(),
+                                            }),
+                                            range: None,
+                                        })
+                                    )
+                                }
                             }
+
                         }
                     },
                     _ => {}
@@ -355,86 +369,86 @@ impl LanguageServer for Backend {
                     _ => {
                         if let Some(wnode) = parser::find_node_at_cursor(&doc.tree, &pos, &doc.text) {
                             let op_name = parser::get_node_name(wnode, &doc.text).unwrap_or("".to_string());
-                            // self.client.log_message(MessageType::INFO,
-                            //     format!("COMPLETION DEBUG: Name='{}' Kind={}", op_name, wnode.kind())).await;
+                            self.client.log_message(MessageType::INFO,
+                                format!("COMPLETION DEBUG: Name='{}' Kind={}", op_name, wnode.kind())).await;
 
-                            if !op_name.is_empty() {
-                                match wnode.kind() {
-                                    ":" => {
-                                        let mut v = HashSet::new();
-                                        let types = vec!["a", "i", "k", "b", "S", "f", "w", "InstrDef", "Instr", "Opcode", "Complex"];
-                                        v.extend(types);
-                                        for (_, udt) in doc.user_definitions.user_defined_types.iter() {
-                                            v.insert(udt.udt_name.as_str());
-                                        }
+                            match wnode.kind() {
+                                ":" => {
+                                    let mut v = HashSet::new();
+                                    let types = vec!["a", "i", "k", "b", "S", "f", "w", "InstrDef", "Instr", "Opcode", "Complex"];
+                                    v.extend(types);
+                                    for (_, udt) in doc.user_definitions.user_defined_types.iter() {
+                                        v.insert(udt.udt_name.as_str());
+                                    }
 
-                                        let total_types: Vec<&str> = v.into_iter().collect();
-                                        let items: Vec<CompletionItem> = total_types
-                                            .iter()
-                                            .map(|ty| {
-                                                CompletionItem {
-                                                    label: ty.to_string(),
-                                                    kind: Some(CompletionItemKind::FIELD),
-                                                    detail: Some(format!("{}", ty)),
-                                                    insert_text: Some(ty.to_string()),
-                                                    documentation: Some(Documentation::String(format!("Data type '{}'", ty))),
-                                                    ..Default::default()
-                                                }
-                                            })
-                                            .collect();
-                                        return Ok(Some(CompletionResponse::Array(items)))
-                                    },
-                                    "$" => {
-                                        let mut items = Vec::new();
-                                        for (_, value) in doc.user_definitions.user_defined_macros.iter() {
-                                            items.push(CompletionItem {
-                                                label: value.macro_label.clone(),
+                                    let total_types: Vec<&str> = v.into_iter().collect();
+                                    let items: Vec<CompletionItem> = total_types
+                                        .iter()
+                                        .map(|ty| {
+                                            CompletionItem {
+                                                label: ty.to_string(),
                                                 kind: Some(CompletionItemKind::FIELD),
-                                                detail: Some(format!("# {} #", value.macro_values)),
-                                                insert_text: Some(value.macro_name.clone()),
-                                                documentation: Some(Documentation::String("user defined macro".to_string())),
+                                                detail: Some(format!("{}", ty)),
+                                                insert_text: Some(ty.to_string()),
+                                                documentation: Some(Documentation::String(format!("Data type '{}'", ty))),
+                                                ..Default::default()
+                                            }
+                                        })
+                                        .collect();
+                                    return Ok(Some(CompletionResponse::Array(items)))
+                                },
+                                "$" => {
+                                    let mut items = Vec::new();
+                                    for (_, value) in doc.user_definitions.user_defined_macros.iter() {
+                                        items.push(CompletionItem {
+                                            label: value.macro_label.clone(),
+                                            kind: Some(CompletionItemKind::FIELD),
+                                            detail: Some(format!("# {} #", value.macro_values)),
+                                            insert_text: Some(value.macro_name.clone()),
+                                            documentation: Some(Documentation::String("user defined macro".to_string())),
+                                            ..Default::default()
+                                            }
+                                        );
+                                    }
+                                    if let Some(omacros) = &self.json_reference_completion_list.omacros_data {
+                                        for (omacro, macro_value) in omacros {
+                                            items.push(CompletionItem {
+                                                label: omacro.clone(),
+                                                kind: Some(CompletionItemKind::FIELD),
+                                                detail: Some(format!("value: {}", macro_value.value)),
+                                                insert_text: Some(omacro.clone()),
+                                                documentation: Some(Documentation::String(format!("equivalent to: {}", macro_value.equivalent_to))),
                                                 ..Default::default()
                                                 }
                                             );
                                         }
-                                        if let Some(omacros) = &self.json_reference_completion_list.omacros_data {
-                                            for (omacro, macro_value) in omacros {
-                                                items.push(CompletionItem {
-                                                    label: omacro.clone(),
-                                                    kind: Some(CompletionItemKind::FIELD),
-                                                    detail: Some(format!("value: {}", macro_value.value)),
-                                                    insert_text: Some(omacro.clone()),
-                                                    documentation: Some(Documentation::String(format!("equivalent to: {}", macro_value.equivalent_to))),
-                                                    ..Default::default()
-                                                    }
-                                                );
-                                            }
-                                        }
-                                        if !items.is_empty() {
-                                            return Ok(Some(CompletionResponse::Array(items)))
-                                        }
-                                        return Ok(None)
-                                    },
-                                    "flag_identifier" => {
-                                        if let Some(ref list) = self.json_reference_completion_list.oflag_data {
-                                            let mut items = Vec::new();
-                                            for (_, data) in list {
-                                                let data_body = data.get_string_from_body();
-                                                let slice_body: String = String::from(&data_body[1..]);
-                                                items.push(CompletionItem {
-                                                    label: data.prefix.clone(),
-                                                    kind: Some(CompletionItemKind::FIELD),
-                                                    insert_text: Some(slice_body),
-                                                    documentation: Some(Documentation::String(format!("{}", data.description))),
-                                                    ..Default::default()
-                                                    }
-                                                )
-                                            }
-                                            return Ok(Some(CompletionResponse::Array(items)))
-                                        }
-                                        return Ok(None)
                                     }
-                                    _ => {
+                                    if !items.is_empty() {
+                                        return Ok(Some(CompletionResponse::Array(items)))
+                                    }
+                                    return Ok(None)
+                                },
+                                "flag_identifier" => {
+                                    if let Some(ref list) = self.json_reference_completion_list.oflag_data {
+                                        let mut items = Vec::new();
+                                        for (_, data) in list {
+                                            let data_body = data.get_string_from_body();
+                                            let slice_body: String = String::from(&data_body[1..]);
+                                            items.push(CompletionItem {
+                                                label: data.prefix.clone(),
+                                                kind: Some(CompletionItemKind::FIELD),
+                                                insert_text: Some(slice_body),
+                                                documentation: Some(Documentation::String(format!("{}", data.description))),
+                                                ..Default::default()
+                                                }
+                                            )
+                                        }
+                                        return Ok(Some(CompletionResponse::Array(items)))
+                                    }
+                                    return Ok(None)
+                                }
+                                _ => {
+                                    if !op_name.is_empty() {
                                         if let Some(p) = wnode.parent() {
                                             let pkind = p.kind();
                                             if pkind != "modern_udo_inputs" && wnode.kind() != "legacy_udo_args" && pkind != "flag_content" {
@@ -471,10 +485,10 @@ impl LanguageServer for Backend {
                                                 return Ok(None)
                                             }
                                         }
+                                        return Ok(None)
                                     }
                                 }
                             }
-                            return Ok(None)
                         }
                     },
                 }

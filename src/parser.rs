@@ -588,23 +588,26 @@ pub fn iterate_tree<'a>(
         match node.kind() {
             // check types
             "typed_identifier" => {
-                if let Some(node_explicit_type) = node.child_by_field_name("type") {
-                    let node_name = node.child_by_field_name("name").unwrap();
-                    if node_explicit_type.kind() == "identifier" {
-                        nodes_to_diagnostics.types.push(node_explicit_type);
-                    }
+                if let Some(p) = node.parent() {
+                    if let Some(node_explicit_type) = node.child_by_field_name("type") {
+                        let node_name = node.child_by_field_name("name").unwrap();
+                        if node_explicit_type.kind() == "identifier" {
+                            nodes_to_diagnostics.types.push(node_explicit_type);
+                        }
 
-                    let name = get_node_name(node_name, &text).unwrap();
-                    let ty = get_node_name(node_explicit_type, &text).unwrap();
-                    if let Some(n) = nodes_to_diagnostics.typed_vars.get_mut(&name) {
-                        *n = ty
-                    } else {
-                        nodes_to_diagnostics.typed_vars.insert(name.clone(), ty);
-                    }
+                        let name = get_node_name(node_name, &text).unwrap();
+                        let ty = get_node_name(node_explicit_type, &text).unwrap();
+                        if let Some(n) = nodes_to_diagnostics.typed_vars.get_mut(&name) {
+                            *n = ty
+                        } else {
+                            nodes_to_diagnostics.typed_vars.insert(name.clone(), ty);
+                        }
 
-                    let is_struct_field = node.parent().map(|p| p.kind() == "struct_definition").unwrap_or(false);
-                    if !is_struct_field {
-                        nodes_to_diagnostics.user_definitions.add_udv(node, &name, text);
+                        let is_struct_field = node.parent().map(|p| p.kind() == "struct_definition").unwrap_or(false);
+                        let is_opcode_name = node.parent().map(|p| p.kind() == "opcode_name").unwrap_or(false);
+                        if !is_struct_field && !is_opcode_name {
+                            nodes_to_diagnostics.user_definitions.add_udv(node, &name, text);
+                        }
                     }
                 }
             },
