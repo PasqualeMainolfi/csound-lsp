@@ -1,5 +1,7 @@
 #![allow(unused)]
 
+use regex::{ Regex, Captures };
+
 use rust_embed::{ EmbeddedFile, RustEmbed };
 use tower_lsp::lsp_types::lsif::ItemKind;
 use tower_lsp::lsp_types::{
@@ -15,24 +17,27 @@ use tower_lsp::lsp_types::{
 };
 use tree_sitter::{ Node, Parser, Point, Tree, Query, QueryCursor, StreamingIterator };
 use std::fmt::{ Display, Formatter };
-use std::fmt;
+use std::{fmt, fs};
 use std::path::Path;
 use std::collections::{ HashMap, HashSet };
 use serde::Deserialize;
-use tree_sitter_csound::{ LANGUAGE, HIGHLIGHTS_QUERY };
+use tree_sitter_python;
+use tree_sitter_html;
+use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
 
 pub const SEMANTIC_TOKENS: &[SemanticTokenType] = &[
-    SemanticTokenType::VARIABLE,
+    SemanticTokenType::DECORATOR,
     SemanticTokenType::PARAMETER,
-    SemanticTokenType::NUMBER,
-    SemanticTokenType::STRING,
     SemanticTokenType::MACRO,
     SemanticTokenType::TYPE,
-    SemanticTokenType::FUNCTION,
     SemanticTokenType::COMMENT,
     SemanticTokenType::KEYWORD,
     SemanticTokenType::PROPERTY,
     SemanticTokenType::NAMESPACE,
+    SemanticTokenType::VARIABLE,
+    SemanticTokenType::STRING,
+    SemanticTokenType::NUMBER,
+    SemanticTokenType::FUNCTION,
     SemanticTokenType::OPERATOR
 ];
 
@@ -67,18 +72,56 @@ struct AssetCsoundOpcodeCompletion;
 #[folder = "csound_data/opcodes"]
 struct AssetCsoundOpcodeReferences;
 
-#[derive(Debug)]
-pub struct ParesedTree {
-    pub tree: Tree,
+#[derive(RustEmbed)]
+#[folder = "csound_data/examples"]
+struct AssetCsoundOpcodeExamples;
+
+#[derive(RustEmbed)]
+#[folder = "csound_data/csound_reference_manual"]
+struct AssetCsoundManual;
+
+pub struct ExternalQuery {
+    pub parser: Parser,
     pub query: Query
 }
 
-pub fn parse_doc(text: &str) -> ParesedTree {
+pub struct ParsedTree {
+    pub tree: Tree,
+    pub query: Query,
+    pub query_injection: Query,
+    pub query_py: Query,
+    pub query_html: Query,
+    pub csound_parser: Parser,
+    pub py_parser: Parser,
+    pub html_parser: Parser
+}
+
+pub fn parse_doc(text: &str) -> ParsedTree {
     let mut p = Parser::new();
     let language = LANGUAGE.into();
     p.set_language(&language).unwrap();
     let query = Query::new(&LANGUAGE.into(), HIGHLIGHTS_QUERY).unwrap();
-    ParesedTree { tree: p.parse(text, None).unwrap(), query }
+    let query_injection = Query::new(&LANGUAGE.into(), INJECTIONS_QUERY).unwrap();
+
+    let mut py = Parser::new();
+    let py_language = tree_sitter_python::LANGUAGE.into();
+    py.set_language(&py_language).unwrap();
+    let query_py = Query::new(&tree_sitter_python::LANGUAGE.into(), tree_sitter_python::HIGHLIGHTS_QUERY).unwrap();
+
+    let mut html = Parser::new();
+    let html_language = tree_sitter_html::LANGUAGE.into();
+    html.set_language(&html_language).unwrap();
+    let query_html = Query::new(&tree_sitter_html::LANGUAGE.into(), tree_sitter_html::HIGHLIGHTS_QUERY).unwrap();
+    ParsedTree {
+        tree: p.parse(text, None).unwrap(),
+        query,
+        query_injection,
+        query_py,
+        query_html,
+        csound_parser: p,
+        py_parser: py,
+        html_parser: html
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -125,7 +168,7 @@ fn open_json_data(data: &str) -> Option<EmbeddedFile> {
 }
 
 pub fn read_csound_json_data() -> CsoundJsonData {
-    let mut cj: CsoundJsonData = CsoundJsonData{
+    let mut cj: CsoundJsonData = CsoundJsonData {
         opcodes_data: None,
         omacros_data: None,
         oflag_data: None
@@ -186,7 +229,8 @@ fn has_ancestor_of_kind(node: Node, kind: &str) -> bool {
 pub enum GErrors {
     Syntax,
     ExplicitType,
-    ScoreStatement
+    ScoreStatement,
+    MissingPfield
 }
 
 #[derive(Debug)]
@@ -229,6 +273,7 @@ enum OpcodeCheck {
 pub enum Scope {
     Instr(String),
     Udo(String),
+    Score,
     Global
 }
 
@@ -385,6 +430,10 @@ impl UserDefinitions {
                 udv.var_scope = Scope::Global;
                 udv.var_calls = 2;
                 self.global_defined_vars.insert(key.clone(), udv);
+            } else if pkind == "label_statement" {
+                udv.var_scope = preferred_scope.clone();
+                udv.is_unused = true;
+                self.global_defined_vars.insert(key.clone(), udv);
             } else {
                 let is_write = access_type == AccessVariableType::Write;
                 udv.is_undefined = !is_write;
@@ -410,7 +459,7 @@ impl UserDefinitions {
         let mut completion_items = Vec::new();
         let mut cursor = node.walk();
         let mut local_udt = UserDefinedType::new();
-        for child in node.children_by_field_name("fields", &mut cursor) {
+        for child in node.children_by_field_name("struct_field", &mut cursor) {
             let child_name = child.child_by_field_name("name").and_then(|n| get_node_name(n, &text));
             let child_type = child.child_by_field_name("type").and_then(|n| get_node_name(n, &text));
 
@@ -619,9 +668,9 @@ pub fn iterate_tree<'a>(
                     pk == "typed_identifier"            ||
                     pk == "global_typed_identifier"     ||
                     pk == "struct_definition"           ||
-                    pk == "label_statement"             ||
+                    pk == "macro_args"                  ||
                     pk == "flag_content"                ||
-                    (pk == "struct_access"    && p.child_by_field_name("member").map(|m| m.id() == node.id()).unwrap_or(false))     ||
+                    (pk == "struct_access"    && p.child_by_field_name("struct_member").map(|m| m.id() == node.id()).unwrap_or(false))     ||
                     (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))       ||
                     (pk == "opcode_statement" && p.child_by_field_name("op_macro").map(|op| op.id() == node.id()).unwrap_or(false)) ||
                     (pk == "function_call"    && p.child_by_field_name("function").map(|f| f.id() == node.id()).unwrap_or(false))
@@ -629,7 +678,25 @@ pub fn iterate_tree<'a>(
 
                 if !should_skip {
                     if let Some(name) = get_node_name(node, text) {
-                        nodes_to_diagnostics.user_definitions.add_udv(node, &name, text);
+                        if !vec!["CsScore", "CsoundSynthesizer", "CsoundSynthesiser", "CsOptions", "CsInstruments"].contains(&name.as_str()) {
+                            nodes_to_diagnostics.user_definitions.add_udv(node, &name, text);
+                        }
+                    }
+                }
+
+                if let Some(p) = parent {
+                    match p.kind() {
+                        "ERROR" => {
+                            let scope = find_scope(node, &text);
+                            if scope == Scope::Score {
+                                nodes_to_diagnostics.generic_errors.push(GenericError {
+                                        node: node,
+                                        error_type: GErrors::ScoreStatement
+                                    }
+                                );
+                            }
+                        },
+                        _ => { }
                     }
                 }
             },
@@ -670,7 +737,7 @@ pub fn iterate_tree<'a>(
             },
             // check user defined types
             "struct_definition" => {
-                if let Some(node_type) = node.child_by_field_name("name") {
+                if let Some(node_type) = node.child_by_field_name("struct_name") {
                     if let Some(node_name) = get_node_name(node_type, &text) {
                         let node_key = node_name.clone();
                         nodes_to_diagnostics.udt.insert(node_name);
@@ -713,9 +780,19 @@ pub fn iterate_tree<'a>(
                     }
                 }
             },
+            "score_statement_i" => {
+                let pkind = node.parent().map(|p| p.kind()).unwrap();
+                if pkind == "ERROR" {
+                    nodes_to_diagnostics.generic_errors.push(GenericError {
+                        node: node,
+                        error_type: GErrors::MissingPfield
+                    });
+                }
+            }
             // check ERROR node
             "ERROR" => {
                 if let Some(node_name) = get_node_name(node, &text) {
+                    let scope = find_scope(node, &text);
                     let trim_name = node_name.trim();
                     let current_parent_kind = node.parent()
                         .map(|p| p.kind())
@@ -728,17 +805,11 @@ pub fn iterate_tree<'a>(
                         !trim_name.contains("<")
                     };
 
-                    if current_parent_kind != "modern_udo_outputs" && condition {
+                    if scope != Scope::Score && current_parent_kind != "modern_udo_outputs" && condition {
                         if trim_name.len() == 1 || trim_name.contains(":") {
                             nodes_to_diagnostics.generic_errors.push(GenericError {
                                     node: node,
                                     error_type: GErrors::ExplicitType
-                                }
-                            );
-                        } else if current_parent_kind.starts_with("score_") {
-                            nodes_to_diagnostics.generic_errors.push(GenericError {
-                                    node: node,
-                                    error_type: GErrors::ScoreStatement
                                 }
                             );
                         } else {
@@ -827,15 +898,19 @@ pub fn find_node_at_cursor<'a>(tree: &'a Tree, pos: &Position, text: &str) -> Op
 pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
     let mut current_node = node;
     loop {
+        let ckind = current_node.kind();
         if let Some(node_child) = current_node.child_by_field_name("name") {
             if let Some(n) = get_node_name(node_child, &text) {
-                let ckind = current_node.kind();
                 match ckind {
                     "instrument_definition" | "instr"  => return  Scope::Instr(n),
                     "udo_definition_modern" | "udo_definition_legacy" => return  Scope::Udo(n),
                     _ => { }
                 }
             }
+        }
+
+        if ckind == "score_block" || ckind == "cs_score" {
+            return Scope::Score
         }
 
         if let Some(p) = current_node.parent() {
@@ -862,8 +937,10 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
         { return AccessVariableType::Write; }
 
         if p_kind.contains("assignment_statement") {
-            if let Some(left) = parent.child_by_field_name("left") {
-                if node.start_byte() >= left.start_byte() && current_node.end_byte() <= left.end_byte() {
+            let mut cursor = current_node.walk();
+            let childrens = parent.children_by_field_name("left", &mut cursor);
+            for child in childrens {
+                if node.start_byte() >= child.start_byte() && current_node.end_byte() <= child.end_byte() {
                     if let Some(op) = parent.child_by_field_name("operator") {
                         if let Some(op_text) = get_node_name(op, text) {
                             if ["+=", "-=", "*=", "/=", "%="].contains(&op_text.as_str()) {
@@ -871,7 +948,9 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
                             }
                         }
                     }
-                    return AccessVariableType::Write;
+                    if child.kind() != "," {
+                        return AccessVariableType::Write;
+                    }
                 }
             }
             return AccessVariableType::Read;
@@ -893,6 +972,23 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
     AccessVariableType::Read
 }
 
+fn expand_includes(content: &str) -> String {
+    let rex = Regex::new(r#"--8<--\s+"([^"]+)""#).unwrap();
+    rex.replace_all(content, |cap: &Captures| {
+        let cap_str = &cap[1].to_string();
+        let entire_path = Path::new(cap_str);
+        let path = entire_path.file_name().and_then(|f| f.to_str()).unwrap();
+        if let Some(c) = AssetCsoundOpcodeExamples::get(path) {
+            match std::str::from_utf8(c.data.as_ref()) {
+                Ok(f) => f.to_string(),
+                Err(_) => format!("<!-- undefined includes {} -->", path)
+            }
+        } else {
+            format!("<!-- undefined includes {} -->", path)
+        }
+    }).to_string()
+}
+
 pub fn load_opcodes() -> HashMap<String, String> {
     let mut map = HashMap::new();
 
@@ -906,7 +1002,18 @@ pub fn load_opcodes() -> HashMap<String, String> {
 
             if let Some(content_file) = AssetCsoundOpcodeReferences::get(file_name) {
                 if let Ok(content_str) = std::str::from_utf8(content_file.data.as_ref()) {
-                    map.insert(name, content_str.to_string());
+                    let content = expand_includes(&content_str);
+
+                    let re_code = Regex::new(r"```[ \t]*csound[^\n]*").unwrap();
+                    let content = re_code.replace_all(&content, "\n```csound\n").to_string();
+
+                    let re_code = Regex::new(r"[ \t]*(```\n)").unwrap();
+                    let content = re_code.replace_all(&content, "\n```\n").to_string();
+
+                    let re = Regex::new(r"<br\s*/?>").unwrap();
+                    let content = re.replace_all(&content, "\n\n").to_string();
+
+                    map.insert(name, content);
                 }
             }
         }
@@ -916,19 +1023,24 @@ pub fn load_opcodes() -> HashMap<String, String> {
 
 fn capture_to_token_type(capture: &str) -> Option<SemanticTokenType> {
     match capture {
+        "attribute"                 => Some(SemanticTokenType::DECORATOR),
         "variable.parameter"        => Some(SemanticTokenType::PARAMETER),
-        "macro"                     => Some(SemanticTokenType::MACRO),
+        "macro.emphasis.strong"     => Some(SemanticTokenType::MACRO),
         "type"                      => Some(SemanticTokenType::TYPE),
         "comment"                   => Some(SemanticTokenType::COMMENT),
-        "keyword"                   => Some(SemanticTokenType::KEYWORD),
+        "keyword" |
+        "keyword.emphasis.strong"   => Some(SemanticTokenType::KEYWORD),
+        "constant" |
+        "constant.builtin" |
+        "constant.builtin.emphasis" |
         "property"                  => Some(SemanticTokenType::PROPERTY),
-        "tag"                       => Some(SemanticTokenType::NAMESPACE),
+        "tag" |
+        "tag.emphsis"               => Some(SemanticTokenType::NAMESPACE),
         "variable" |
         "label"                     => Some(SemanticTokenType::VARIABLE),
         "string" |
         "string.special"            => Some(SemanticTokenType::STRING),
-        "constant.numeric" |
-        "constant"                  => Some(SemanticTokenType::NUMBER),
+        "number"                    => Some(SemanticTokenType::NUMBER),
         "function" |
         "entity.name.function"      => Some(SemanticTokenType::FUNCTION),
         "operator"              |
@@ -938,7 +1050,7 @@ fn capture_to_token_type(capture: &str) -> Option<SemanticTokenType> {
     }
 }
 
-pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String) -> Vec<(u32, u32, u32, u32, u32)> {
+pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String, offset: Option<Point>) -> Vec<(u32, u32, u32, u32, u32)> {
     let mut cursor = QueryCursor::new();
     let mut qmatches = cursor.matches(&query, tree.root_node(), text.as_bytes());
     let mut tokens: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // (line, col, length, type)
@@ -948,14 +1060,20 @@ pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String) -> Vec<(u3
             let capture_name = &query.capture_names()[capture.index as usize];
             if let Some(token_type) = capture_to_token_type(&capture_name) {
                 let start_position = capture.node.start_position();
-                // let end_position = capture.node.end_position();
 
                 let length = (capture.node.end_byte() - capture.node.start_byte()) as u32;
                 let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap() as u32;
 
+                let mut line = start_position.row as u32;
+                let mut col = start_position.column as u32;
+                if let Some(off) = offset {
+                    line += off.row as u32;
+                    if start_position.row == 0 { col += off.column as u32; }
+                }
+
                 tokens.push((
-                    start_position.row as u32,
-                    start_position.column as u32,
+                    line,
+                    col,
                     length,
                     ttype,
                     0
@@ -992,4 +1110,79 @@ pub fn get_delta_pos(semantic_tokens: &mut Vec<(u32, u32, u32, u32, u32)>) -> Ve
         prev_start = *col;
     }
     stokens
+}
+
+pub fn get_injections(query_injection: &Query, tree: &Tree, text: &String, cs_parser: &mut Parser, cs_query: &Query, py_external: &mut ExternalQuery, html_external: &mut ExternalQuery)  -> Vec<(u32, u32, u32, u32, u32)> {
+    let mut cursor = QueryCursor::new();
+    let mut qmatches = cursor.matches(&query_injection, tree.root_node(), text.as_bytes());
+    let index_content = query_injection.capture_index_for_name("injection.content").unwrap();
+
+    let mut stokens = Vec::new();
+
+    while let Some(m) = qmatches.next() {
+        let settings = query_injection.property_settings(m.pattern_index);
+
+        let mut lang = "";
+        for p in settings {
+            if &(*p.key) == "injection.language" {
+                if let Some(val) = &p.value {
+                    lang = val;
+                }
+            }
+        }
+
+        let capture_content = m.captures.iter().find(|c| c.index == index_content);
+        if let Some(cap) = capture_content {
+            let node = cap.node;
+            let start_byte = node.start_byte();
+            let end_byte = node.end_byte();
+            let start_position = node.start_position();
+
+            let block = &text[start_byte..end_byte].to_string();
+
+            match lang {
+                "python" => {
+                    if let Some(py_tree) = py_external.parser.parse(&block, None) {
+                        let py_tokens = get_semantic_tokens(&py_external.query, &py_tree, &block, Some(start_position));
+                        stokens.extend(py_tokens);
+                    }
+                },
+                "html" => {
+                    if let Some(html_tree) = html_external.parser.parse(&block, None) {
+                        let html_tokens = get_semantic_tokens(&html_external.query, &html_tree, &block, Some(start_position));
+                        stokens.extend(html_tokens);
+                    }
+                },
+                "csound" => {
+                    if let Some(csound_tree) = cs_parser.parse(&block, None) {
+                        let csound_tokens = get_semantic_tokens(&cs_query, &csound_tree, &block, Some(start_position));
+                        stokens.extend(csound_tokens);
+                    }
+                },
+                _ => { }
+            }
+        }
+
+    }
+    stokens
+}
+
+pub fn extract_manual(target_folder: &str) -> Result<(), std::io::Error>{
+    let temp_path = Path::new(target_folder);
+
+    for fpath in AssetCsoundManual::iter() {
+        let content = AssetCsoundManual::get(fpath.as_ref()).unwrap();
+        let dest = temp_path.join(fpath.as_ref());
+
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(&parent)?;
+        }
+
+        if !dest.exists() {
+            std::fs::write(dest, content.data)?;
+        }
+    }
+
+    Ok(())
+
 }

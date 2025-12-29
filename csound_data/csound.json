@@ -7,7 +7,7 @@
     "cross2": {
         "prefix": "cross2(ain1, ain2, isize, ioverlap, iwin, kbias)",
         "body": "cross2",
-        "description": "Cross synthesis using FFT&#x27;s."
+        "description": "Cross synthesis using FFT's."
     },
     "vmultv_i": {
         "prefix": "vmultv_i(ifn1, ifn2, ielements [, idstoffset] [, isrcoffset])",
@@ -35,7 +35,7 @@
         "description": "Uses the data from an ATS analysis file to perform noise resynthesis using a modified randi function."
     },
     "linen": {
-        "prefix": "linen({k, x}amp, irise, idur, idec)",
+        "prefix": "linen({x, k}amp, irise, idur, idec)",
         "body": "linen",
         "description": "Applies a straight line rise and decay pattern to an input amp signal."
     },
@@ -75,7 +75,7 @@
         "description": "Sends 14-bit MIDI controller output at k-rate."
     },
     "linenr": {
-        "prefix": "linenr({k, x}amp, irise, idec, iatdec)",
+        "prefix": "linenr({x, k}amp, irise, idec, iatdec)",
         "body": "linenr",
         "description": "The _linen_ opcode extended with a final release segment."
     },
@@ -345,7 +345,7 @@
         "description": "Sends an i-rate or k-rate signal or string to a user-defined channel."
     },
     "strtod": {
-        "prefix": "strtod({S, i}str)",
+        "prefix": "strtod({i, S}str)",
         "body": "strtod",
         "description": "Converts a string to a floating point value (i-rate)."
     },
@@ -560,7 +560,7 @@
         "description": "Generates a natural-sounding user-controllable vibrato."
     },
     "rifft": {
-        "prefix": "rifft({in:k[], in:Complex[]})",
+        "prefix": "rifft({in:Complex[], in:k[]})",
         "body": "rifft",
         "description": "Complex-to-real Inverse Fast Fourier Transform."
     },
@@ -687,7 +687,7 @@
     "temposcal": {
         "prefix": "temposcal(ktimescal, kamp, kpitch, ktab, klock [,ifftsize, idecim, ithresh])",
         "body": "temposcal",
-        "description": "Phase-locked vocoder processing with onset detection/processing, &#x27;tempo-scaling&#x27;."
+        "description": "Phase-locked vocoder processing with onset detection/processing, 'tempo-scaling'."
     },
     "invalue": {
         "prefix": "invalue(\"channel name\")",
@@ -702,7 +702,7 @@
     "ihold": {
         "prefix": "ihold()",
         "body": "ihold",
-        "description": "Causes a finite-duration note to become a &amp;#8220;held&amp;#8221; note."
+        "description": "Causes a finite-duration note to become a \u201cheld\u201d note."
     },
     "ftchnls": {
         "prefix": "ftchnls(x)",
@@ -727,7 +727,7 @@
     "else": {
         "prefix": "else",
         "body": "else",
-        "description": "Executes a block of code when an &quot;if...then&quot; condition is false."
+        "description": "Executes a block of code when an \"if...then\" condition is false."
     },
     "adsynt": {
         "prefix": "adsynt(kamp, kcps, iwfn, ifreqfn, iampfn, icnt [, iphs])",
@@ -817,7 +817,7 @@
     "pvsmix": {
         "prefix": "pvsmix(fsigin1, fsigin2)",
         "body": "pvsmix",
-        "description": "Mix &#x27;seamlessly&#x27; two pv signals."
+        "description": "Mix 'seamlessly' two pv signals."
     },
     "outic14": {
         "prefix": "outic14(ichn, imsb, ilsb, ivalue, imin, imax)",
@@ -1005,7 +1005,7 @@
         "description": "An emulation of a human voice."
     },
     "oscili": {
-        "prefix": "oscili({k, x}amp, xcp [, ifn, iphs])",
+        "prefix": "oscili({x, k}amp, xcp [, ifn, iphs])",
         "body": "oscili",
         "description": "A simple oscillator with linear interpolation."
     },
@@ -1095,7 +1095,7 @@
         "description": "Trace a series of line segments between specified absolute points with"
     },
     "jspline": {
-        "prefix": "jspline({k, x}amp, kcpsMin, kcpsMax)",
+        "prefix": "jspline({x, k}amp, kcpsMin, kcpsMax)",
         "body": "jspline",
         "description": "A jitter-spline generator."
     },
@@ -1105,7 +1105,7 @@
         "description": "Assign to a string variable by copying the source which may be a constant or another string variable."
     },
     "randc": {
-        "prefix": "randc({k, x}amp, xcps [, iseed] [, isize] [, ioffset])",
+        "prefix": "randc({x, k}amp, xcps [, iseed] [, isize] [, ioffset])",
         "body": "randc",
         "description": "Generates a controlled random number series with cubic interpolation between each new number."
     },
@@ -1125,7 +1125,7 @@
         "description": "Output is a controlled random number series between -*amp* and +*amp*."
     },
     "min": {
-        "prefix": "min({k, i, a}in1, ain2 [, ain3] [, ain4] [...])",
+        "prefix": "min({i, k, a}in1, ain2 [, ain3] [, ain4] [...])",
         "body": "min",
         "description": "Produces a signal that is the minimum of any number of input signals."
     },
@@ -1412,7 +1412,7 @@
     "tableigpw": {
         "prefix": "tableigpw(ifn)",
         "body": "tableigpw",
-        "description": "Writes a table&#x27;s guard point."
+        "description": "Writes a table's guard point."
     },
     "outletf": {
         "prefix": "outletf(Sname, fsignal)",
@@ -1715,7 +1715,7 @@
         "description": "Extracts an integer from a decimal number."
     },
     "strtodk": {
-        "prefix": "strtodk({S, k}str)",
+        "prefix": "strtodk({k, S}str)",
         "body": "strtodk",
         "description": "Converts a string to a floating point value at i- or k-rate."
     },
@@ -1770,7 +1770,7 @@
         "description": "Start a multicast listening process to a particular port, which can be used by OSClisten."
     },
     "midifilepos": {
-        "prefix": "midifilepos({[id:i], pos: [, id:i], pos: [, id:i]})",
+        "prefix": "midifilepos({pos: [, id:i], [id:i], pos: [, id:i]})",
         "body": "midifilepos",
         "description": "Gets/Sets the playback position of a MIDI file. "
     },
@@ -1867,7 +1867,7 @@
     "freeverb": {
         "prefix": "freeverb(ainL, ainR, kRoomSize, kHFDam [, iSRat [, iSkip]])",
         "body": "freeverb",
-        "description": "Opcode version of Jezar&#x27;s Freeverb."
+        "description": "Opcode version of Jezar's Freeverb."
     },
     "p": {
         "prefix": "p(x)",
@@ -1892,7 +1892,7 @@
     "date": {
         "prefix": "date()",
         "body": "date",
-        "description": "Returns the number seconds since a base date, using the operating system&#x27;s clock."
+        "description": "Returns the number seconds since a base date, using the operating system's clock."
     },
     "phaser2": {
         "prefix": "phaser2(asig, kfreq, kq, kord, kmode, ksep, kfeedback)",
@@ -1935,7 +1935,7 @@
         "description": "Writes 32-channel audio data to an external device or stream."
     },
     "active": {
-        "prefix": "active({S, i, k}nsnum [,iopt [,inorel]])",
+        "prefix": "active({S, k, i}nsnum [,iopt [,inorel]])",
         "body": "active",
         "description": "Returns the number of active instances of an instrument with options to ignore releasing instances."
     },
@@ -1950,7 +1950,7 @@
         "description": "Rewinds playback of a MIDI file. "
     },
     "tablekt": {
-        "prefix": "tablekt({k, x}ndx, kfn [, ixmode] [, ixoff] [, iwrap])",
+        "prefix": "tablekt({x, k}ndx, kfn [, ixmode] [, ixoff] [, iwrap])",
         "body": "tablekt",
         "description": "Provides k-rate control over table numbers."
     },
@@ -2000,7 +2000,7 @@
         "description": "Convert Ssrc to lower case, and write the result to Sdst."
     },
     "push": {
-        "prefix": "push({i, x}val1, [xval2, ... , xval31])",
+        "prefix": "push({x, i}val1, [xval2, ... , xval31])",
         "body": "push",
         "description": "Pushes a value into the global stack.  Deprecated."
     },
@@ -2100,7 +2100,7 @@
         "description": "Control allocation of cpu resources on a per-instrument basis, to optimize realtime output."
     },
     "lpcanal": {
-        "prefix": "lpcanal({k, i, a}src, kflg, kprd, isiz, iord [, iwin])",
+        "prefix": "lpcanal({i, k, a}src, kflg, kprd, isiz, iord [, iwin])",
         "body": "lpcanal",
         "description": "Streaming linear prediction analysis."
     },
@@ -2185,7 +2185,7 @@
         "description": "Uses FM synthesis to create a percussive flute sound."
     },
     "randh": {
-        "prefix": "randh({k, x}amp, xcps [, iseed] [, isize] [, ioffset])",
+        "prefix": "randh({x, k}amp, xcps [, iseed] [, isize] [, ioffset])",
         "body": "randh",
         "description": "Generates random numbers and holds them for a period of time."
     },
@@ -2307,7 +2307,7 @@
     "elseif": {
         "prefix": "elseif xa R xb then",
         "body": "elseif",
-        "description": "Defines another &quot;if...then&quot; condition when a &quot;if...then&quot; condition is false."
+        "description": "Defines another \"if...then\" condition when a \"if...then\" condition is false."
     },
     "pvsbufread": {
         "prefix": "pvsbufread(ktime, khandle [, ilo, ihi, iclear])",
@@ -2405,7 +2405,7 @@
         "description": "Calculates the dot product of two arrays."
     },
     "sum": {
-        "prefix": "sum({k, i, a}sig1 [, asig2] [, asig3] [...])",
+        "prefix": "sum({i, k, a}sig1 [, asig2] [, asig3] [...])",
         "body": "sum",
         "description": "Sums any number of a-rate signals, or array elements."
     },
@@ -2500,7 +2500,7 @@
         "description": "Adds a new score event."
     },
     "fft": {
-        "prefix": "fft({in:Complex[ [, inverse:i], in:k[], in:Complex[]})",
+        "prefix": "fft({in:Complex[], in:Complex[ [, inverse:i], in:k[]})",
         "body": "fft",
         "description": "Complex-to-complex Fast Fourier Transform."
     },
@@ -2520,7 +2520,7 @@
         "description": "Periodically reads four orchestra control-signal values from an external file."
     },
     "tableikt": {
-        "prefix": "tableikt({k, x}ndx, kfn [, ixmode] [, ixoff] [, iwrap])",
+        "prefix": "tableikt({x, k}ndx, kfn [, ixmode] [, ixoff] [, iwrap])",
         "body": "tableikt",
         "description": "Provides k-rate control over table numbers."
     },
@@ -2620,12 +2620,12 @@
         "description": "Get the note number, in octave-point-decimal units, of the current MIDI event."
     },
     "opcodeinfo": {
-        "prefix": "opcodeinfo({obj:Opcode, opc:OpcodeDef})",
+        "prefix": "opcodeinfo({opc:OpcodeDef, obj:Opcode})",
         "body": "opcodeinfo",
         "description": "Prints information on an opcode definition and its overloads."
     },
     "randi": {
-        "prefix": "randi({k, x}amp, xcps [, iseed] [, isize] [, ioffset])",
+        "prefix": "randi({x, k}amp, xcps [, iseed] [, isize] [, ioffset])",
         "body": "randi",
         "description": "Generates a controlled random number series with interpolation between each new number."
     },
@@ -2770,7 +2770,7 @@
         "description": "Linear distribution random number generator (positive values only)."
     },
     "rspline": {
-        "prefix": "rspline({k, x}rangeMin, xrangeMax, kcpsMin, kcpsMax)",
+        "prefix": "rspline({x, k}rangeMin, xrangeMax, kcpsMin, kcpsMax)",
         "body": "rspline",
         "description": "Generate random spline curves."
     },
@@ -2885,7 +2885,7 @@
         "description": "Determines the root-mean-square amplitude of an audio signal."
     },
     "midifilein": {
-        "prefix": "midifilein({index:k, [id:k], index:i, [id:i]})",
+        "prefix": "midifilein({index:i, [id:i], index:k, [id:k]})",
         "body": "midifilein",
         "description": "Returns a generic MIDI message from a MIDI file."
     },
@@ -2932,7 +2932,7 @@
     "partikkel": {
         "prefix": "partikkel(agrainfreq, kdistribution, idisttab, async, kenv2amt, ienv2tab, ienv_attack, ienv_decay, ksustain_amount, ka_d_ratio, kduration, kamp, igainmasks, kwavfreq, ksweepshape, iwavfreqstarttab, iwavfreqendtab, awavfm, ifmamptab, kfmenv, icosine, ktraincps, knumpartials, kchroma, ichannelmasks, krandommask, kwaveform1, kwaveform2, kwaveform3, kwaveform4, iwaveamptab, asamplepos1, asamplepos2, asamplepos3, asamplepos4, kwavekey1, kwavekey2, kwavekey3, kwavekey4, imax_grains [, iopcode_id, ipanlaws])",
         "body": "partikkel",
-        "description": "Granular synthesizer with &quot;per grain&quot; control over many of its parameters.  Has a sync input to sychronize its internal grain scheduler clock to an external clock source."
+        "description": "Granular synthesizer with \"per grain\" control over many of its parameters.  Has a sync input to sychronize its internal grain scheduler clock to an external clock source."
     },
     "noteon": {
         "prefix": "noteon(ichn, inum, ivel)",
@@ -2942,7 +2942,7 @@
     "clip": {
         "prefix": "clip(asig, imeth, ilimit [, iarg])",
         "body": "clip",
-        "description": "Clips an a-rate signal to a predefined limit, in a &amp;#8220;soft&amp;#8221; manner, using one of three methods."
+        "description": "Clips an a-rate signal to a predefined limit, in a \u201csoft\u201d manner, using one of three methods."
     },
     "\\#": {
         "prefix": "a # b  (bitwise NON EQUIVALENCE)",
@@ -3060,7 +3060,7 @@
         "description": "Exponential Lag."
     },
     "tab": {
-        "prefix": "tab({k, x}ndx, if [, ixmode])",
+        "prefix": "tab({x, k}ndx, if [, ixmode])",
         "body": "tab",
         "description": "Fast table opcode."
     },
@@ -3072,7 +3072,7 @@
     "\u02c6": {
         "prefix": "a ^ b  (b not audio-rate)",
         "body": "\u02c6",
-        "description": "&amp;#8220;Power of&amp;#8221; operator."
+        "description": "\u201cPower of\u201d operator."
     },
     "printk": {
         "prefix": "printk(itime, kval [, ispace] [, inamed])",
@@ -3092,10 +3092,10 @@
     "reverb": {
         "prefix": "reverb(asig, krvt [, iskip])",
         "body": "reverb",
-        "description": "Reverberates an input signal with a &amp;#8220;natural room&amp;#8221; frequency response."
+        "description": "Reverberates an input signal with a \u201cnatural room\u201d frequency response."
     },
     "init": {
-        "prefix": "init({size1: [, size2:i, ...], inst:Inst [, p4:i, ...], a, op:Opcod [, arg1:*, ...]})",
+        "prefix": "init({size1: [, size2:i, ...], op:Opcod [, arg1:*, ...], inst:Inst [, p4:i, ...], a})",
         "body": "init",
         "description": "Initialises one or more objects."
     },
@@ -3227,7 +3227,7 @@
     "fmmetal": {
         "prefix": "fmmetal(kamp, kfreq, kc1, kc2, kvdepth, kvrate, ifn1, ifn2, ifn3, ifn4, ivfn)",
         "body": "fmmetal",
-        "description": "Uses FM synthesis to create a &amp;#8220;Heavy Metal&amp;#8221; sound."
+        "description": "Uses FM synthesis to create a \u201cHeavy Metal\u201d sound."
     },
     "tabw": {
         "prefix": "tabw({k, a}sig, kndx, ifn [,ixmode])",
@@ -3315,7 +3315,7 @@
         "description": "An interpolating variable time delay."
     },
     "strtolk": {
-        "prefix": "strtolk({S, k}str)",
+        "prefix": "strtolk({k, S}str)",
         "body": "strtolk",
         "description": "Converts a string to a signed integer value at i- or k-rate."
     },
@@ -3377,7 +3377,7 @@
     "partikkelsync": {
         "prefix": "partikkelsync(iopcode_id)",
         "body": "partikkelsync",
-        "description": "Outputs _partikkel_&#x27;s grain scheduler clock pulse and phase to synchronize several instances of the _partikkel_ opcode to the same clock source."
+        "description": "Outputs _partikkel_'s grain scheduler clock pulse and phase to synchronize several instances of the _partikkel_ opcode to the same clock source."
     },
     "expon": {
         "prefix": "expon(ia, idur, ib)",
@@ -3687,7 +3687,7 @@
     "vcomb": {
         "prefix": "vcomb(asig, krvt, xlpt, imaxlpt [, iskip] [, insmps])",
         "body": "vcomb",
-        "description": "Variably reverberates an input signal with a &amp;#8220;colored&amp;#8221; frequency response."
+        "description": "Variably reverberates an input signal with a \u201ccolored\u201d frequency response."
     },
     "chnparams": {
         "prefix": "chnparams(Sname)",
@@ -3710,7 +3710,7 @@
         "description": "Returns the square root of _x_ (_x_ non-negative)."
     },
     "oscil3": {
-        "prefix": "oscil3({k, x}amp, xcps [, ifn, iphs])",
+        "prefix": "oscil3({x, k}amp, xcps [, ifn, iphs])",
         "body": "oscil3",
         "description": "A simple oscillator with cubic interpolation."
     },
@@ -3817,7 +3817,7 @@
     "vmirror": {
         "prefix": "vmirror(ifn, kmin, kmax, ielements)",
         "body": "vmirror",
-        "description": "&#x27;Reflects&#x27; elements of vectorial control signals on thresholds."
+        "description": "'Reflects' elements of vectorial control signals on thresholds."
     },
     "<<": {
         "prefix": "a << b  (bitshift left)",
@@ -3925,12 +3925,12 @@
         "description": "A high-pass Butterworth filter."
     },
     "strtol": {
-        "prefix": "strtol({S, i}str)",
+        "prefix": "strtol({i, S}str)",
         "body": "strtol",
         "description": "Converts a string to a signed integer value (i-rate)."
     },
     "create": {
-        "prefix": "create({instr:InstrDef, opc:OpcodeDef, len: [, overload:i], code:S, opc:OpcodeDe [, overload:})",
+        "prefix": "create({opc:OpcodeDe [, overload:, instr:InstrDef, code:S, opc:OpcodeDef, len: [, overload:i]})",
         "body": "create",
         "description": "Creates a new instrument definition, instrument instance, or opcode object."
     },
@@ -4062,7 +4062,7 @@
     "endif": {
         "prefix": "endif",
         "body": "endif",
-        "description": "Closes a block of code that begins with an [&quot;if...then&quot;] statement."
+        "description": "Closes a block of code that begins with an [\"if...then\"] statement."
     },
     "arduinoRead": {
         "prefix": "arduinoRead(iPort, iStream [, iSmooth])",
@@ -4142,7 +4142,7 @@
     "tablegpw": {
         "prefix": "tablegpw(kfn)",
         "body": "tablegpw",
-        "description": "Writes a table&#x27;s guard point."
+        "description": "Writes a table's guard point."
     },
     "zawm": {
         "prefix": "zawm(asig, kndx [, imix])",
@@ -4160,7 +4160,7 @@
         "description": "Execute a performance pass on an instrument or opcode."
     },
     "oscilikt": {
-        "prefix": "oscilikt({k, x}amp, xcps, kfn [, iphs] [, istor])",
+        "prefix": "oscilikt({x, k}amp, xcps, kfn [, iphs] [, istor])",
         "body": "oscilikt",
         "description": "A linearly interpolated oscillator that allows changing the table number at k-rate."
     },
@@ -4235,7 +4235,7 @@
         "description": "Returns a table number at k-time for a given oscillator frequency and wavform."
     },
     "envlpx": {
-        "prefix": "envlpx({k, x}amp, irise, idur, idec, ifn, iatss, iatdec [, ixmod])",
+        "prefix": "envlpx({x, k}amp, irise, idur, idec, ifn, iatss, iatdec [, ixmod])",
         "body": "envlpx",
         "description": "Applies an envelope consisting of 3 segments."
     },
@@ -4292,7 +4292,7 @@
     "vecdelay": {
         "prefix": "vecdelay(ifn, ifnIn, ifnDel, ielements, imaxdel [, iskip])",
         "body": "vecdelay",
-        "description": "Generate a sort of &#x27;vectorial&#x27; delay."
+        "description": "Generate a sort of 'vectorial' delay."
     },
     "ctrl7": {
         "prefix": "ctrl7(ichan, ictlno, imin, imax [, ifn])",
@@ -4675,7 +4675,7 @@
         "description": "Returns the amplitude equivalent for a given decibel amount."
     },
     "max": {
-        "prefix": "max({k, i, a}in1, ain2 [, ain3] [, ain4] [...])",
+        "prefix": "max({i, k, a}in1, ain2 [, ain3] [, ain4] [...])",
         "body": "max",
         "description": "Produces a signal that is the maximum of any number of input signals."
     },
@@ -4747,7 +4747,7 @@
     "tival": {
         "prefix": "tival()",
         "body": "tival",
-        "description": "Puts the value of the instrument&#x27;s internal &amp;#8220;tie-in&amp;#8221; flag into the named i-rate variable."
+        "description": "Puts the value of the instrument's internal \u201ctie-in\u201d flag into the named i-rate variable."
     },
     "floor": {
         "prefix": "floor(x)",
@@ -4825,7 +4825,7 @@
         "description": "PVS-based oscillator simulator."
     },
     "phasorbnk": {
-        "prefix": "phasorbnk({k, x}cps, kndx, icnt [, iphs])",
+        "prefix": "phasorbnk({x, k}cps, kndx, icnt [, iphs])",
         "body": "phasorbnk",
         "description": "Produce an arbitrary number of normalized moving phase values, accessable by an index."
     },
@@ -4850,7 +4850,7 @@
         "description": "Reads data from and ATS data file and stores it in an internal data table of frequency, amplitude pairs."
     },
     "chnset": {
-        "prefix": "chnset({k, i, S, a}val, Sname)",
+        "prefix": "chnset({S, k, i, a}val, Sname)",
         "body": "chnset",
         "description": "Writes data to a channel of the named software bus."
     },
@@ -4917,7 +4917,7 @@
     "vport": {
         "prefix": "vport(ifn, khtime, ielements [, ifnInit])",
         "body": "vport",
-        "description": "Generate a sort of &#x27;vectorial&#x27; portamento."
+        "description": "Generate a sort of 'vectorial' portamento."
     },
     "oversample": {
         "prefix": "oversample(ifactor [,icvt_in, icvt_out])",
@@ -4927,7 +4927,7 @@
     "mp3scal": {
         "prefix": "mp3scal(Sfile, ktimescal, kpitch, kamp [, iskip, ifftsize, idecim, ilock])",
         "body": "mp3scal",
-        "description": "Phase-locked vocoder processing with onset detection/processing, &#x27;tempo-scaling&#x27;."
+        "description": "Phase-locked vocoder processing with onset detection/processing, 'tempo-scaling'."
     },
     "chnmix": {
         "prefix": "chnmix(aval, Sname)",
@@ -5080,7 +5080,7 @@
         "description": "Performs division between two vectorial control signals."
     },
     "phasor": {
-        "prefix": "phasor({k, x}cps [, iphs])",
+        "prefix": "phasor({x, k}cps [, iphs])",
         "body": "phasor",
         "description": "Produce a normalized moving phase value."
     },
@@ -5395,7 +5395,7 @@
         "description": "Return the ASCII code of the character in Sstr at ipos (defaults to zero which means the first character), or zero if ipos is out of range."
     },
     "trim": {
-        "prefix": "trim({i, x}array, ilen)",
+        "prefix": "trim({x, i}array, ilen)",
         "body": "trim",
         "description": "Adjust size of a one-dimensional array."
     },
@@ -5577,7 +5577,7 @@
     "pareq": {
         "prefix": "pareq(asig, kc, kv, kq [, imode] [, iskip])",
         "body": "pareq",
-        "description": "Implementation of Zoelzer&#x27;s parametric equalizer filters, with some modifications by the author."
+        "description": "Implementation of Zoelzer's parametric equalizer filters, with some modifications by the author."
     },
     "fmin": {
         "prefix": "fmin({k, i}arg1[], iarg2[])",
@@ -5602,7 +5602,7 @@
     "midichannelaftertouch": {
         "prefix": "midichannelaftertouch(xchannelaftertouch [, ilow] [, ihigh])",
         "body": "midichannelaftertouch",
-        "description": "Gets a MIDI channel&#x27;s aftertouch value."
+        "description": "Gets a MIDI channel's aftertouch value."
     },
     "bformdec1": {
         "prefix": "bformdec1(isetup, abform[])",
@@ -5637,7 +5637,7 @@
     "filescal": {
         "prefix": "filescal(ktimescal, kamp, kpitch, Sfile, klock [,ifftsize, idecim, ithresh])",
         "body": "filescal",
-        "description": "Phase-locked vocoder processing with onset detection/processing, &#x27;tempo-scaling&#x27;."
+        "description": "Phase-locked vocoder processing with onset detection/processing, 'tempo-scaling'."
     },
     "slider8": {
         "prefix": "slider8(ichan, ictlnum1, imin1, imax1, init1, ifn1, ..., ictlnum8, imin8, imax8, init8, ifn8)",
@@ -5697,7 +5697,7 @@
     "vrandi": {
         "prefix": "vrandi(ifn,  krange, kcps, ielements [, idstoffset] [, iseed] [, isize] [, ioffset])",
         "body": "vrandi",
-        "description": "Generate a sort of &#x27;vectorial band-limited noise&#x27;."
+        "description": "Generate a sort of 'vectorial band-limited noise'."
     },
     "aftouch": {
         "prefix": "aftouch([imin] [, imax])",
@@ -5725,7 +5725,7 @@
         "description": "Returns the loop segment start-time of a stored function table number."
     },
     "turnoff": {
-        "prefix": "turnoff({i, k})",
+        "prefix": "turnoff({k, i})",
         "body": "turnoff",
         "description": "Enables an instrument to turn itself off or to turn an instance of another instrument off."
     },
@@ -5750,7 +5750,7 @@
         "description": "Poisson distribution random number generator (positive values only)."
     },
     "envlpxr": {
-        "prefix": "envlpxr({k, x}amp, irise, idec, ifn, iatss, iatdec [, ixmod] [,irind])",
+        "prefix": "envlpxr({x, k}amp, irise, idec, ifn, iatss, iatdec [, ixmod] [,irind])",
         "body": "envlpxr",
         "description": "The _envlpx_ opcode with a final release segment."
     },
@@ -5980,7 +5980,7 @@
         "description": "Spectral azimuth-based de-mixing of stereo sources, with a reverse-panning result."
     },
     "oscil": {
-        "prefix": "oscil({k, x}amp, xcps [, ifn, iphs])",
+        "prefix": "oscil({x, k}amp, xcps [, ifn, iphs])",
         "body": "oscil",
         "description": "A simple oscillator without any interpolation."
     },
@@ -6052,7 +6052,7 @@
     "control": {
         "prefix": "control(knum)",
         "body": "control",
-        "description": "Configurable slider controls for realtime user input. Requires Winsound or TCL/TK. It reads a slider&#x27;s value."
+        "description": "Configurable slider controls for realtime user input. Requires Winsound or TCL/TK. It reads a slider's value."
     },
     "specscal": {
         "prefix": "specscal(wsigin, ifscale, ifthresh)",
@@ -6172,7 +6172,7 @@
     "combinv": {
         "prefix": "combinv(asig, krvt, ilpt [, iskip] [, insmps])",
         "body": "combinv",
-        "description": "Reverberates an input signal with a &amp;#8220;colored&amp;#8221; frequency response. with a FIR filter."
+        "description": "Reverberates an input signal with a \u201ccolored\u201d frequency response. with a FIR filter."
     },
     "otafilter": {
         "prefix": "otafilter(in:a, cf:{a, k}, res:{a, k}, drive: [, stor:i])",
@@ -6202,7 +6202,7 @@
     "comb": {
         "prefix": "comb(asig, krvt, ilpt [, iskip] [, insmps])",
         "body": "comb",
-        "description": "Reverberates an input signal with a &amp;#8220;colored&amp;#8221; frequency response."
+        "description": "Reverberates an input signal with a \u201ccolored\u201d frequency response."
     },
     "moscil": {
         "prefix": "moscil(kchn, knum, kvel, kdur, kpause)",

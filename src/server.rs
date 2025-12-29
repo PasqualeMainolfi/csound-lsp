@@ -1,28 +1,33 @@
 use crate::parser;
 
+use serde_json::Value;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{ Client, LanguageServer };
-use tree_sitter::{ Tree, Query };
+use tree_sitter::{ Tree, Query, Parser };
 use std::collections::{ HashMap, HashSet };
+use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 use std::sync::Arc;
 
-#[derive(Debug)]
 pub struct CurrentDocument {
     pub text: String,
     pub tree: Tree,
     pub query: Query,
+    pub query_injection: Query,
     pub user_definitions: parser::UserDefinitions,
-    pub cached_typed_vars: HashMap<String, String>
+    pub cached_typed_vars: HashMap<String, String>,
+    pub csound_parser: Parser,
+    pub py_query: parser::ExternalQuery,
+    pub html_query: parser::ExternalQuery
 }
 
-#[derive(Debug)]
 pub struct Backend {
     client: Client,
     document_state: Arc<RwLock<HashMap<Url, CurrentDocument>>>,
     opcodes: HashMap<String, String>,
-    json_reference_completion_list: parser::CsoundJsonData
+    json_reference_completion_list: parser::CsoundJsonData,
+    manual_temp_path: Arc<RwLock<PathBuf>>
 }
 
 impl Backend {
@@ -33,7 +38,8 @@ impl Backend {
             client,
             document_state: Arc::new(RwLock::new(HashMap::new())),
             opcodes,
-            json_reference_completion_list
+            json_reference_completion_list,
+            manual_temp_path: Arc::new(RwLock::new(PathBuf::new()))
         }
     }
 }
@@ -41,6 +47,15 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+        let mut temp_dir = std::env::temp_dir();
+        temp_dir.push("csound_html_manual");
+
+        if let Err(e) = parser::extract_manual(temp_dir.to_str().unwrap()) {
+            self.client.log_message(MessageType::WARNING, format!("Failed to load Csound offline Manual {}", e)).await;
+        }
+
+        let mut mp = self.manual_temp_path.write().await;
+        *mp = temp_dir;
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -48,7 +63,12 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
-                    trigger_characters: Some(vec![".".to_string(), ":".to_string(), "$".to_string(), "-".to_string()]),
+                    trigger_characters: Some(vec![
+                        ".".to_string(),
+                        ":".to_string(),
+                        "$".to_string(),
+                        "-".to_string()
+                    ]),
                     work_done_progress_options: Default::default(),
                     all_commit_characters: None,
                     ..Default::default()
@@ -60,6 +80,17 @@ impl LanguageServer for Backend {
                         ..Default::default()
                     }
                 )),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec![
+                        "csound-lsp.run_file".into(),
+                        "csound-lsp.to_audio_file".into(),
+                        "csound-lsp.open_manual".into()
+                    ],
+                    ..Default::default()
+                }),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false)
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -68,7 +99,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "CSound LSP initialized!")
+            .log_message(MessageType::INFO, "Csound LSP initialized!")
             .await;
     }
 
@@ -87,8 +118,12 @@ impl LanguageServer for Backend {
                 text,
                 tree: parsed_tree.tree,
                 query: parsed_tree.query,
+                query_injection: parsed_tree.query_injection,
                 user_definitions: parser::UserDefinitions::new(),
-                cached_typed_vars: HashMap::new()
+                cached_typed_vars: HashMap::new(),
+                csound_parser: parsed_tree.csound_parser,
+                py_query: parser::ExternalQuery { parser: parsed_tree.py_parser, query: parsed_tree.query_py },
+                html_query: parser::ExternalQuery { parser: parsed_tree.html_parser, query: parsed_tree.query_html }
             }
         );
     }
@@ -108,19 +143,20 @@ impl LanguageServer for Backend {
 
             if let Some(doc) = d.get_mut(&uri) {
                 let text = current_change.text;
-                let parses_tree = parser::parse_doc(&text);
+                let parsed_tree = parser::parse_doc(&text);
                 doc.text = text.clone();
-                doc.tree = parses_tree.tree;
-                doc.query = parses_tree.query;
+                doc.tree = parsed_tree.tree;
+                doc.query = parsed_tree.query;
+                doc.query_injection = parsed_tree.query_injection;
                 let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text);
                 doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
                 doc.user_definitions = nodes_to_diagnostics.user_definitions;
 
-                parser::get_semantic_tokens(&doc.query, &doc.tree, &text);
+                parser::get_semantic_tokens(&doc.query, &doc.tree, &text, None);
 
                 for var in &doc.user_definitions.unused_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
-
+                        let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
                         self.client.log_message(MessageType::INFO,
                             format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
                             finded_node.kind(),
@@ -134,7 +170,13 @@ impl LanguageServer for Backend {
                             range: parser::get_node_range(&finded_node),
                             severity: Some(DiagnosticSeverity::HINT),
                             source: Some("csound-lsp".into()),
-                            message: "Unused variable".to_string(),
+                            message: {
+                                match parent_finded_kind {
+                                    "label_statement" => "Unused label".to_string(),
+                                    "macro_name" => "Unused macro".to_string(),
+                                    _ => "Unused variable".to_string(),
+                                }
+                            },
                             tags: Some(vec![DiagnosticTag::UNNECESSARY]),
                             ..Default::default()
                         };
@@ -146,7 +188,7 @@ impl LanguageServer for Backend {
 
                 for var in &doc.user_definitions.undefined_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
-
+                        let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
                         self.client.log_message(MessageType::INFO,
                                 format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
                             finded_node.kind(),
@@ -161,7 +203,13 @@ impl LanguageServer for Backend {
                                 range: *node_range,
                                 severity: Some(DiagnosticSeverity::ERROR),
                                 source: Some("csound-lsp".into()),
-                                message: "Undefined variable".to_string(),
+                                message: {
+                                    match parent_finded_kind {
+                                        "label_statement" => "Undefined label".to_string(),
+                                        "macro_usage" => "Undefined macro".to_string(),
+                                        _ => "Undefined variable".to_string(),
+                                    }
+                                },
                                 ..Default::default()
                             };
                             if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
@@ -220,7 +268,10 @@ impl LanguageServer for Backend {
                             format!("Unknown type identifier: <{}>", node_name)
                         },
                         parser::GErrors::ScoreStatement => {
-                            format!("Unknown score statement")
+                            format!("Unknown score statement <{}>", node_name)
+                        },
+                        parser::GErrors::MissingPfield => {
+                            format!("Missing mandatory p-fields (p1, p2, p3)")
                         }
                     };
                     let diag = Diagnostic {
@@ -369,8 +420,9 @@ impl LanguageServer for Backend {
                     _ => {
                         if let Some(wnode) = parser::find_node_at_cursor(&doc.tree, &pos, &doc.text) {
                             let op_name = parser::get_node_name(wnode, &doc.text).unwrap_or("".to_string());
+                            let p = wnode.parent().map(|p| p.kind()).unwrap();
                             self.client.log_message(MessageType::INFO,
-                                format!("COMPLETION DEBUG: Name='{}' Kind={}", op_name, wnode.kind())).await;
+                                format!("COMPLETION DEBUG: Name={} Kind={} Parent={}", op_name, wnode.kind(), p)).await;
 
                             match wnode.kind() {
                                 ":" => {
@@ -451,7 +503,15 @@ impl LanguageServer for Backend {
                                     if !op_name.is_empty() {
                                         if let Some(p) = wnode.parent() {
                                             let pkind = p.kind();
-                                            if pkind != "modern_udo_inputs" && wnode.kind() != "legacy_udo_args" && pkind != "flag_content" {
+                                            if
+                                            {
+                                                wnode.kind() != "legacy_udo_args" &&
+                                                pkind != "modern_udo_inputs"      &&
+                                                pkind != "flag_content"           &&
+                                                pkind != "struct_access"          &&
+                                                pkind != "ERROR"
+                                            }
+                                            {
                                                 if let Some(ref list) = self.json_reference_completion_list.opcodes_data {
                                                     let mut items = Vec::new();
                                                     for (n, data) in list {
@@ -500,9 +560,12 @@ impl LanguageServer for Backend {
 
     async fn semantic_tokens_full(&self, params: SemanticTokensParams) -> Result<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri;
-        let dc = self.document_state.read().await;
-        if let Some(doc) = dc.get(&uri) {
-            let mut st = parser::get_semantic_tokens(&doc.query, &doc.tree, &doc.text);
+        let mut dc = self.document_state.write().await;
+        if let Some(doc) = dc.get_mut(&uri) {
+            let mut st = parser::get_semantic_tokens(&doc.query, &doc.tree, &doc.text, None);
+            let inj = parser::get_injections(&doc.query_injection, &doc.tree, &doc.text, &mut doc.csound_parser, &doc.query, &mut doc.py_query, &mut doc.html_query);
+
+            st.extend(inj);
             let stokens = parser::get_delta_pos(&mut st);
 
             return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens{
@@ -510,5 +573,117 @@ impl LanguageServer for Backend {
             })))
         }
         Ok(None)
+    }
+
+    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
+        let cmd = params.command.as_str();
+        match cmd {
+            "csound-lsp.run_file" | "csound-lsp.to_audio_file" => {
+                let mut file_paths:Vec<String> = Vec::new();
+                for args in &params.arguments {
+                    match args {
+                        Value::String(s) => file_paths.push(s.clone()),
+                        Value::Array(paths) => {
+                            for p in paths {
+                                if let Some(path) = p.as_str() {
+                                    file_paths.push(path.to_string());
+                                }
+                            }
+                        },
+                        _ => { }
+                    }
+                }
+
+                if cmd == "csound-lsp.run_file" {
+                    return Ok(Some(serde_json::json!({
+                        "action": "run csound file",
+                        "exec": "csound",
+                        "args": "-o dac",
+                        "path": file_paths
+                    })))
+                }
+
+                if !file_paths.is_empty() {
+                    let file_name = Path::new(&file_paths[0]).file_stem().unwrap();
+                    return Ok(Some(serde_json::json!({
+                        "action": "save as audio file",
+                        "exec": "csound",
+                        "args": format!("-o {}.wav", file_name.to_string_lossy()),
+                        "path": file_paths
+                    })))
+                } else {
+                    return Ok(None)
+                }
+            },
+            "csound-lsp.open_manual" => {
+                let p = self.manual_temp_path.read().await;
+
+                return Ok(Some(serde_json::json!({
+                    "action": "open html csound manual",
+                    "exec": "",
+                    "args": "",
+                    "path": p.to_string_lossy()
+                })))
+            }
+            _ => { return Ok(None) }
+        }
+    }
+
+    async fn code_lens(&self, _: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let mut lense = Vec::new();
+
+        lense.push(CodeLens {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 }
+            },
+            command: Some(Command {
+                title: "📓 Csound Manual".into(),
+                command: "csound.openManual".into(),
+                arguments: None
+            }),
+            data: None
+        });
+
+        lense.push(CodeLens {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 }
+            },
+            command: Some(Command {
+                title: "▶ Run".into(),
+                command: "csound.runFile".to_string(),
+                arguments: Some(vec![])
+            }),
+            data: None
+        });
+
+        lense.push(CodeLens {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 }
+            },
+            command: Some(Command {
+                title: "⏹ Stop".into(),
+                command: "csound.stopExecution".to_string(),
+                arguments: Some(vec![])
+            }),
+            data: None
+        });
+
+        lense.push(CodeLens {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 }
+            },
+            command: Some(Command {
+                title: "🔊 To Audio File".into(),
+                command: "csound.saveAsAudioFile".to_string(),
+                arguments: Some(vec![])
+            }),
+            data: None
+        });
+
+        Ok(Some(lense))
     }
 }

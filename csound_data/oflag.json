@@ -2,7 +2,7 @@
     "-&commat; FILE": {
         "prefix": "-&commat; FILE",
         "body": "-&commat",
-        "description": "Provide an extended command-line in file &ldquo;FILE&rdquo;\n\n"
+        "description": "Provide an extended command-line in file \u201cFILE\u201d\n\n"
     },
     "-3, --format=24bit": {
         "prefix": "-3, --format=24bit",
@@ -577,6 +577,6 @@
     "-z NUM, --list-opcodesNUM": {
         "prefix": "-z NUM, --list-opcodesNUM",
         "body": "-z",
-        "description": "List opcodes in this version:\n\n* no NUM, just show names\n* NUM = 0, just show names\n* NUM = 1, show arguments to each opcode using the format &lt;opname&gt; &lt;outargs&gt; &lt;inargs&gt;\n* NUM = 2, show names including\ndeprecated ones\n* NUM = 3, show arguments to each\nopcode, including deprecated ones, using the format &lt;opname&gt; &lt;outargs&gt; &lt;inargs&gt;\n"
+        "description": "List opcodes in this version:\n\n* no NUM, just show names\n* NUM = 0, just show names\n* NUM = 1, show arguments to each opcode using the format <opname> <outargs> <inargs>\n* NUM = 2, show names including\ndeprecated ones\n* NUM = 3, show arguments to each\nopcode, including deprecated ones, using the format <opname> <outargs> <inargs>\n"
     }
 }
