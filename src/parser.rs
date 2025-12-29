@@ -15,6 +15,7 @@ use tower_lsp::lsp_types::{
     SemanticTokensLegend,
     SemanticTokenModifier
 };
+
 use tree_sitter::{ Node, Parser, Point, Tree, Query, QueryCursor, StreamingIterator };
 use std::fmt::{ Display, Formatter };
 use std::{fmt, fs};
@@ -24,38 +25,7 @@ use serde::Deserialize;
 use tree_sitter_python;
 use tree_sitter_html;
 use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
-
-pub const SEMANTIC_TOKENS: &[SemanticTokenType] = &[
-    SemanticTokenType::DECORATOR,
-    SemanticTokenType::PARAMETER,
-    SemanticTokenType::MACRO,
-    SemanticTokenType::TYPE,
-    SemanticTokenType::COMMENT,
-    SemanticTokenType::KEYWORD,
-    SemanticTokenType::PROPERTY,
-    SemanticTokenType::NAMESPACE,
-    SemanticTokenType::VARIABLE,
-    SemanticTokenType::STRING,
-    SemanticTokenType::NUMBER,
-    SemanticTokenType::FUNCTION,
-    SemanticTokenType::OPERATOR
-];
-
-pub const OMACROS: [&'static str; 13] = [
-    "M_E",
-    "MLOG2E",
-    "M_LOG10E",
-    "M_LN2",
-    "M_LN10",
-    "M_PI",
-    "M_PI_2",
-    "M_PI_4",
-    "M_1_PI",
-    "M_2_PI",
-    "M_2_SQRTPI",
-    "M_SQRT2",
-    "M_SQRT1_2"
-];
+use crate::utils::{ SEMANTIC_TOKENS, OMACROS, OPEN_BLOCKS, CLOSE_BLOCKS };
 
 pub fn get_token_lengend() -> SemanticTokensLegend {
     SemanticTokensLegend {
@@ -1185,4 +1155,29 @@ pub fn extract_manual(target_folder: &str) -> Result<(), std::io::Error>{
 
     Ok(())
 
+}
+
+pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
+    let mut indent: usize = 0;
+    let root = tree.root_node();
+
+    let spoint = Point { row: line, column: 0 };
+    let epoint = Point { row: line, column: 9999 };
+
+    if let Some(node) = root.descendant_for_point_range(spoint, epoint) {
+        let nkind = node.kind();
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if OPEN_BLOCKS.contains(&n.kind()) {
+                indent += 1;
+            }
+
+            if (n.id() == node.id() || n.id() == node.parent().unwrap().id()) {
+                if CLOSE_BLOCKS.contains(&nkind) { if indent > 0 { indent -= 1; } }
+            }
+
+            current = n.parent()
+        }
+    }
+    indent
 }

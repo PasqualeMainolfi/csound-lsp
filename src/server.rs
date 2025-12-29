@@ -91,6 +91,16 @@ impl LanguageServer for Backend {
                 code_lens_provider: Some(CodeLensOptions {
                     resolve_provider: Some(false)
                 }),
+                document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "}".to_string(),
+                    more_trigger_character: Some(vec![
+                        "n".to_string(),
+                        "p".to_string(),
+                        "i".to_string(),
+                        "d".to_string(),
+                        "\n".to_string()
+                    ])
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -157,14 +167,6 @@ impl LanguageServer for Backend {
                 for var in &doc.user_definitions.unused_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
                         let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
-                        self.client.log_message(MessageType::INFO,
-                            format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
-                            finded_node.kind(),
-                            finded_node.parent().unwrap().kind(),
-                            var.var_name,
-                            var.var_calls,
-                            var.var_scope
-                        )).await;
 
                         let diag = Diagnostic {
                             range: parser::get_node_range(&finded_node),
@@ -189,14 +191,6 @@ impl LanguageServer for Backend {
                 for var in &doc.user_definitions.undefined_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
                         let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
-                        self.client.log_message(MessageType::INFO,
-                                format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
-                            finded_node.kind(),
-                            finded_node.parent().unwrap().kind(),
-                            var.var_name,
-                            var.var_calls,
-                            var.var_scope
-                        )).await;
 
                         for node_range in &var.references {
                             let diag = Diagnostic {
@@ -300,14 +294,6 @@ impl LanguageServer for Backend {
             if let Some(node) = parser::find_node_at_position(&doc.tree, &pos) {
                 let node_kind = node.kind();
                 let node_type = node.utf8_text(doc.text.as_bytes()).unwrap_or("???"); // opcode key
-
-                self.client.log_message(MessageType::INFO,
-                    format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}",
-                    node_kind,
-                    parser::get_node_name(node, &doc.text).unwrap_or_default(),
-                    node.parent().map(|p| p.kind()).unwrap_or("None"),
-                    parser::find_scope(node, &doc.text)
-                )).await;
 
                 match node_kind {
                     "opcode_name" => {
@@ -420,9 +406,6 @@ impl LanguageServer for Backend {
                     _ => {
                         if let Some(wnode) = parser::find_node_at_cursor(&doc.tree, &pos, &doc.text) {
                             let op_name = parser::get_node_name(wnode, &doc.text).unwrap_or("".to_string());
-                            let p = wnode.parent().map(|p| p.kind()).unwrap();
-                            self.client.log_message(MessageType::INFO,
-                                format!("COMPLETION DEBUG: Name={} Kind={} Parent={}", op_name, wnode.kind(), p)).await;
 
                             match wnode.kind() {
                                 ":" => {
@@ -685,5 +668,37 @@ impl LanguageServer for Backend {
         });
 
         Ok(Some(lense))
+    }
+
+    async fn on_type_formatting(&self, params: DocumentOnTypeFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+
+        let dc = self.document_state.read().await;
+        if let Some(doc) = dc.get(&uri) {
+            let line_index = position.line as usize;
+            let line_text = doc.text.lines().nth(line_index).unwrap_or("");
+            let current_line_size = line_text.len() - line_text.trim_start().len();
+            let current_indent_str = &line_text[..current_line_size];
+
+            let tab_size = params.options.tab_size as usize;
+            let indent_level = parser::make_indent(&doc.tree, &doc.text, position.line as usize);
+            let indent = " ".repeat(indent_level * tab_size);
+
+            if current_indent_str == indent {
+                return Ok(None);
+            }
+
+            return Ok(Some(vec![
+                TextEdit {
+                    range: Range {
+                        start: Position::new(position.line, 0),
+                        end: Position::new(position.line, current_line_size as u32)
+                    },
+                    new_text: indent
+                }
+            ]))
+        }
+        Ok(None)
     }
 }

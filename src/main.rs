@@ -1,5 +1,6 @@
 mod server;
 mod parser;
+mod utils;
 
 use tower_lsp::{ LspService, Server };
 use server::Backend;
