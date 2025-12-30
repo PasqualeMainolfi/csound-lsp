@@ -167,14 +167,6 @@ impl LanguageServer for Backend {
                 for var in &doc.user_definitions.unused_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
                         let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
-                        self.client.log_message(MessageType::INFO,
-                            format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
-                            finded_node.kind(),
-                            finded_node.parent().unwrap().kind(),
-                            var.var_name,
-                            var.var_calls,
-                            var.var_scope
-                        )).await;
 
                         let diag = Diagnostic {
                             range: parser::get_node_range(&finded_node),
@@ -199,14 +191,6 @@ impl LanguageServer for Backend {
                 for var in &doc.user_definitions.undefined_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
                         let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
-                        self.client.log_message(MessageType::INFO,
-                                format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
-                            finded_node.kind(),
-                            finded_node.parent().unwrap().kind(),
-                            var.var_name,
-                            var.var_calls,
-                            var.var_scope
-                        )).await;
 
                         for node_range in &var.references {
                             let diag = Diagnostic {
@@ -310,14 +294,6 @@ impl LanguageServer for Backend {
             if let Some(node) = parser::find_node_at_position(&doc.tree, &pos) {
                 let node_kind = node.kind();
                 let node_type = node.utf8_text(doc.text.as_bytes()).unwrap_or("???"); // opcode key
-
-                self.client.log_message(MessageType::INFO,
-                    format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}",
-                    node_kind,
-                    parser::get_node_name(node, &doc.text).unwrap_or_default(),
-                    node.parent().map(|p| p.kind()).unwrap_or("None"),
-                    parser::find_scope(node, &doc.text)
-                )).await;
 
                 match node_kind {
                     "opcode_name" => {
@@ -430,9 +406,6 @@ impl LanguageServer for Backend {
                     _ => {
                         if let Some(wnode) = parser::find_node_at_cursor(&doc.tree, &pos, &doc.text) {
                             let op_name = parser::get_node_name(wnode, &doc.text).unwrap_or("".to_string());
-                            let p = wnode.parent().map(|p| p.kind()).unwrap();
-                            self.client.log_message(MessageType::INFO,
-                                format!("COMPLETION DEBUG: Name={} Kind={} Parent={}", op_name, wnode.kind(), p)).await;
 
                             match wnode.kind() {
                                 ":" => {
@@ -500,7 +473,12 @@ impl LanguageServer for Backend {
                                                 label: data.prefix.clone(),
                                                 kind: Some(CompletionItemKind::FIELD),
                                                 insert_text: Some(slice_body),
-                                                documentation: Some(Documentation::String(format!("{}", data.description))),
+                                                documentation: Some(Documentation::MarkupContent(
+                                                    MarkupContent {
+                                                        kind: MarkupKind::Markdown,
+                                                        value: data.description.clone()
+                                                    }
+                                                )),
                                                 ..Default::default()
                                                 }
                                             )

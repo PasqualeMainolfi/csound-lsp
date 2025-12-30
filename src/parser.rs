@@ -1,5 +1,6 @@
 #![allow(unused)]
 
+use crate::utils::{ SEMANTIC_TOKENS, OMACROS, OPEN_BLOCKS, CLOSE_BLOCKS };
 use regex::{ Regex, Captures };
 
 use rust_embed::{ EmbeddedFile, RustEmbed };
@@ -24,8 +25,14 @@ use std::collections::{ HashMap, HashSet };
 use serde::Deserialize;
 use tree_sitter_python;
 use tree_sitter_html;
-use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
-use crate::utils::{ SEMANTIC_TOKENS, OMACROS, OPEN_BLOCKS, CLOSE_BLOCKS };
+use tree_sitter_csound::{
+    LANGUAGE,
+    INJECTIONS_QUERY,
+    HIGHLIGHTS_QUERY,
+    CSOUND_OPCODES_QUERY,
+    CSOUND_FLAGS_QUERY,
+    CSOUND_MACROS_QUERY
+};
 
 pub fn get_token_lengend() -> SemanticTokensLegend {
     SemanticTokensLegend {
@@ -33,10 +40,6 @@ pub fn get_token_lengend() -> SemanticTokensLegend {
         token_modifiers: vec![SemanticTokenModifier::DECLARATION]
     }
 }
-
-#[derive(RustEmbed)]
-#[folder = "csound_data"]
-struct AssetCsoundOpcodeCompletion;
 
 #[derive(RustEmbed)]
 #[folder = "csound_data/opcodes"]
@@ -130,13 +133,6 @@ pub struct CsoundJsonData {
     pub oflag_data: Option<HashMap<String, OpcodesData>>
 }
 
-fn open_json_data(data: &str) -> Option<EmbeddedFile> {
-    match AssetCsoundOpcodeCompletion::get(data) {
-        Some(c) => Some(c),
-        None => None
-    }
-}
-
 pub fn read_csound_json_data() -> CsoundJsonData {
     let mut cj: CsoundJsonData = CsoundJsonData {
         opcodes_data: None,
@@ -144,42 +140,29 @@ pub fn read_csound_json_data() -> CsoundJsonData {
         oflag_data: None
     };
 
-    let opfile = open_json_data("csound.json");
-    let omfile = open_json_data("omacro.json");
-    let offile = open_json_data("oflag.json");
+    cj.opcodes_data = match serde_json::from_str::<HashMap<String, OpcodesData>>(&CSOUND_OPCODES_QUERY) {
+        Ok(map) => Some(map),
+        Err(e) => {
+            eprintln!("ERROR: Could not parse opcode JSON: {}", e);
+            None
+        }
+    };
 
-    if let Some(f) = opfile {
-        let content = std::str::from_utf8(f.data.as_ref()).unwrap_or("");
-        cj.opcodes_data = match serde_json::from_str::<HashMap<String, OpcodesData>>(&content) {
-            Ok(map) => Some(map),
-            Err(e) => {
-                eprintln!("ERROR: Could not parse opcode JSON: {}", e);
-                None
-            }
-        };
-    }
+    cj.omacros_data = match serde_json::from_str::<HashMap<String, OMacro>>(&CSOUND_MACROS_QUERY) {
+        Ok(map) => Some(map),
+        Err(e) => {
+            eprintln!("ERROR: Could not parse omacro JSON: {}", e);
+            None
+        }
+    };
 
-    if let Some(f) = omfile {
-        let content = std::str::from_utf8(f.data.as_ref()).unwrap_or("");
-        cj.omacros_data = match serde_json::from_str::<HashMap<String, OMacro>>(&content) {
-            Ok(map) => Some(map),
-            Err(e) => {
-                eprintln!("ERROR: Could not parse omacro JSON: {}", e);
-                None
-            }
-        };
-    }
-
-    if let Some(f) = offile {
-        let content = std::str::from_utf8(f.data.as_ref()).unwrap_or("");
-        cj.oflag_data = match serde_json::from_str::<HashMap<String, OpcodesData>>(&content) {
-            Ok(map) => Some(map),
-            Err(e) => {
-                eprintln!("ERROR: Could not parse flag JSON: {}", e);
-                None
-            }
-        };
-    }
+    cj.oflag_data = match serde_json::from_str::<HashMap<String, OpcodesData>>(&CSOUND_FLAGS_QUERY) {
+        Ok(map) => Some(map),
+        Err(e) => {
+            eprintln!("ERROR: Could not parse flag JSON: {}", e);
+            None
+        }
+    };
 
     cj
 }
@@ -296,10 +279,6 @@ pub struct UserDefinedVariable {
     pub references: Vec<Range>
 }
 
-// fn get_vtype(kind: &String) -> String {
-
-// }
-
 #[derive(Debug, Clone)]
 pub struct UserDefinedMacro {
     pub node_location: usize,
@@ -336,12 +315,16 @@ impl UserDefinitions {
         let node_range = get_node_range(&node);
         if let Some(var) = map.get_mut(k) {
             var.var_calls += 1;
+            let p = node.parent().unwrap();
+            let pkind = p.kind();
+
             match acc {
                 AccessVariableType::Read => {
                     var.is_unused = false;
                     if var.is_undefined { var.references.push(node_range); }
                 },
                 AccessVariableType::Write => {
+                    if pkind == "label_statement" { var.references.clear(); }
                     var.is_undefined = false;
                     var.node_location = node.start_byte();
                 }
@@ -404,10 +387,6 @@ impl UserDefinitions {
                 udv.var_scope = Scope::Global;
                 udv.var_calls = 2;
                 self.global_defined_vars.insert(key.clone(), udv);
-            // } else if pkind == "label_statement" {
-            //     udv.var_scope = preferred_scope.clone();
-            //     udv.is_unused = true;
-            //     self.global_defined_vars.insert(key.clone(), udv);
             } else {
                 let is_write = access_type == AccessVariableType::Write;
                 udv.is_undefined = !is_write;
