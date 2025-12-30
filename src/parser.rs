@@ -404,10 +404,10 @@ impl UserDefinitions {
                 udv.var_scope = Scope::Global;
                 udv.var_calls = 2;
                 self.global_defined_vars.insert(key.clone(), udv);
-            } else if pkind == "label_statement" {
-                udv.var_scope = preferred_scope.clone();
-                udv.is_unused = true;
-                self.global_defined_vars.insert(key.clone(), udv);
+            // } else if pkind == "label_statement" {
+            //     udv.var_scope = preferred_scope.clone();
+            //     udv.is_unused = true;
+            //     self.global_defined_vars.insert(key.clone(), udv);
             } else {
                 let is_write = access_type == AccessVariableType::Write;
                 udv.is_undefined = !is_write;
@@ -940,6 +940,18 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
                 if current_node.start_byte() >= op_node.end_byte() {
                     return AccessVariableType::Read;
                 }
+            }
+        }
+
+        if p_kind == "label_statement" {
+            if let Some(op_node) = parent.child_by_field_name("label_name") {
+                for i in 0..parent.child_count() {
+                    let c = parent.child(i).unwrap();
+                    if c.kind() == ":" {
+                        return AccessVariableType::Read
+                    }
+                }
+                return AccessVariableType::Write
             }
         }
 
