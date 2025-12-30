@@ -296,6 +296,10 @@ pub struct UserDefinedVariable {
     pub references: Vec<Range>
 }
 
+// fn get_vtype(kind: &String) -> String {
+
+// }
+
 #[derive(Debug, Clone)]
 pub struct UserDefinedMacro {
     pub node_location: usize,
@@ -360,7 +364,7 @@ impl UserDefinitions {
         let pkind = parent.map(|p| p.kind()).unwrap_or("");
 
         let is_global_syntax = pkind == "global_typed_identifier";
-        let is_typed_local_def = pkind == "typed_identifier";
+        // let is_typed_local_def = pkind == "typed_identifier";
 
         let preferred_scope = if self.global_defined_vars.contains_key(key) {
             Scope::Global
@@ -640,6 +644,7 @@ pub fn iterate_tree<'a>(
                     pk == "struct_definition"           ||
                     pk == "macro_args"                  ||
                     pk == "flag_content"                ||
+                    pk == "instrument_definition"       ||
                     (pk == "struct_access"    && p.child_by_field_name("struct_member").map(|m| m.id() == node.id()).unwrap_or(false))     ||
                     (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))       ||
                     (pk == "opcode_statement" && p.child_by_field_name("op_macro").map(|op| op.id() == node.id()).unwrap_or(false)) ||
@@ -649,7 +654,8 @@ pub fn iterate_tree<'a>(
                 if !should_skip {
                     if let Some(name) = get_node_name(node, text) {
                         if !vec!["CsScore", "CsoundSynthesizer", "CsoundSynthesiser", "CsOptions", "CsInstruments"].contains(&name.as_str()) {
-                            nodes_to_diagnostics.user_definitions.add_udv(node, &name, text);
+                            let name = name.split("[").next().unwrap();
+                            nodes_to_diagnostics.user_definitions.add_udv(node, &name.to_string(), text);
                         }
                     }
                 }
@@ -1168,9 +1174,7 @@ pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
         let nkind = node.kind();
         let mut current = Some(node);
         while let Some(n) = current {
-            if OPEN_BLOCKS.contains(&n.kind()) {
-                indent += 1;
-            }
+            if OPEN_BLOCKS.contains(&n.kind()) { indent += 1; }
 
             if (n.id() == node.id() || n.id() == node.parent().unwrap().id()) {
                 if CLOSE_BLOCKS.contains(&nkind) { if indent > 0 { indent -= 1; } }

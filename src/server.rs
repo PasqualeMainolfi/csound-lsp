@@ -295,6 +295,14 @@ impl LanguageServer for Backend {
                 let node_kind = node.kind();
                 let node_type = node.utf8_text(doc.text.as_bytes()).unwrap_or("???"); // opcode key
 
+                self.client.log_message(MessageType::INFO,
+                    format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}",
+                    node_kind,
+                    parser::get_node_name(node, &doc.text).unwrap_or_default(),
+                    node.parent().map(|p| p.kind()).unwrap_or("None"),
+                    parser::find_scope(node, &doc.text)
+                )).await;
+
                 match node_kind {
                     "opcode_name" => {
                         if let Some(ud) = doc.user_definitions.user_defined_opcodes.get(&node_type.to_string()) {
