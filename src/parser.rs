@@ -1,11 +1,12 @@
 #![allow(unused)]
 
 use crate::utils::{ SEMANTIC_TOKENS, OMACROS, OPEN_BLOCKS, CLOSE_BLOCKS };
+use crate::resolve_udos::UdoFile;
 use regex::{ Regex, Captures };
 
 use rust_embed::{ EmbeddedFile, RustEmbed };
-use tower_lsp::lsp_types::lsif::ItemKind;
 use tower_lsp::lsp_types::{
+    lsif::ItemKind,
     Position,
     Range,
     Diagnostic,
@@ -14,25 +15,31 @@ use tower_lsp::lsp_types::{
     SemanticTokensResult,
     SemanticTokens,
     SemanticTokensLegend,
-    SemanticTokenModifier
+    SemanticTokenModifier,
+    Url
 };
 
-use tree_sitter::{ Node, Parser, Point, Tree, Query, QueryCursor, StreamingIterator };
-use std::fmt::{ Display, Formatter };
-use std::{fmt, fs};
-use std::path::Path;
-use std::collections::{ HashMap, HashSet };
+use std::{
+    fmt::{ self, Display, Formatter },
+    path::{ Path, PathBuf },
+    collections::{ HashMap, HashSet },
+    fs
+};
+
+use tree_sitter::{
+    Node,
+    Parser,
+    Point,
+    Tree,
+    Query,
+    QueryCursor,
+    StreamingIterator
+};
+
 use serde::Deserialize;
 use tree_sitter_python;
 use tree_sitter_html;
-use tree_sitter_csound::{
-    LANGUAGE,
-    INJECTIONS_QUERY,
-    HIGHLIGHTS_QUERY,
-    CSOUND_OPCODES_QUERY,
-    CSOUND_FLAGS_QUERY,
-    CSOUND_MACROS_QUERY
-};
+use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
 
 pub fn get_token_lengend() -> SemanticTokensLegend {
     SemanticTokensLegend {
@@ -40,18 +47,6 @@ pub fn get_token_lengend() -> SemanticTokensLegend {
         token_modifiers: vec![SemanticTokenModifier::DECLARATION]
     }
 }
-
-#[derive(RustEmbed)]
-#[folder = "csound_data/opcodes"]
-struct AssetCsoundOpcodeReferences;
-
-#[derive(RustEmbed)]
-#[folder = "csound_data/examples"]
-struct AssetCsoundOpcodeExamples;
-
-#[derive(RustEmbed)]
-#[folder = "csound_data/csound_reference_manual"]
-struct AssetCsoundManual;
 
 pub struct ExternalQuery {
     pub parser: Parser,
@@ -97,76 +92,6 @@ pub fn parse_doc(text: &str) -> ParsedTree {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum BodyOpCompletion {
-    SingleLine(String),
-    MultipleLine(Vec<String>)
-}
-
-#[derive(Deserialize, Debug)]
-pub struct OpcodesData {
-    pub prefix: String,
-    pub body: BodyOpCompletion,
-    pub description: String
-}
-
-impl OpcodesData {
-    pub fn get_string_from_body(&self) -> String {
-        match &self.body {
-            BodyOpCompletion::SingleLine(s) => s.clone(),
-            BodyOpCompletion::MultipleLine(arr) => arr.join("\n")
-        }
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct OMacro {
-    pub value: String,
-    pub equivalent_to: String
-}
-
-#[derive(Debug)]
-pub struct CsoundJsonData {
-    pub opcodes_data: Option<HashMap<String, OpcodesData>>,
-    pub omacros_data: Option<HashMap<String, OMacro>>,
-    pub oflag_data: Option<HashMap<String, OpcodesData>>
-}
-
-pub fn read_csound_json_data() -> CsoundJsonData {
-    let mut cj: CsoundJsonData = CsoundJsonData {
-        opcodes_data: None,
-        omacros_data: None,
-        oflag_data: None
-    };
-
-    cj.opcodes_data = match serde_json::from_str::<HashMap<String, OpcodesData>>(&CSOUND_OPCODES_QUERY) {
-        Ok(map) => Some(map),
-        Err(e) => {
-            eprintln!("ERROR: Could not parse opcode JSON: {}", e);
-            None
-        }
-    };
-
-    cj.omacros_data = match serde_json::from_str::<HashMap<String, OMacro>>(&CSOUND_MACROS_QUERY) {
-        Ok(map) => Some(map),
-        Err(e) => {
-            eprintln!("ERROR: Could not parse omacro JSON: {}", e);
-            None
-        }
-    };
-
-    cj.oflag_data = match serde_json::from_str::<HashMap<String, OpcodesData>>(&CSOUND_FLAGS_QUERY) {
-        Ok(map) => Some(map),
-        Err(e) => {
-            eprintln!("ERROR: Could not parse flag JSON: {}", e);
-            None
-        }
-    };
-
-    cj
-}
-
 fn has_ancestor_of_kind(node: Node, kind: &str) -> bool {
     let mut parent = node.parent();
     while let Some(p) = parent {
@@ -201,6 +126,7 @@ pub struct NodeCollects<'a> {
     pub udt: HashSet<String>,
     pub typed_vars: HashMap<String, String>,
     pub user_definitions: UserDefinitions,
+    pub included_udo_files: HashMap<String, UdoFile>
 }
 
 impl<'a> NodeCollects<'a> {
@@ -213,6 +139,7 @@ impl<'a> NodeCollects<'a> {
             udt: HashSet::new(),
             typed_vars: HashMap::new(),
             user_definitions: UserDefinitions::new(),
+            included_udo_files: HashMap::new()
         }
     }
 }
@@ -237,7 +164,7 @@ pub enum AccessVariableType {
     Update
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UserDefinedType {
     pub udt_name: String,
     pub udt_format: String,
@@ -416,7 +343,6 @@ impl UserDefinitions {
             let child_name = child.child_by_field_name("name").and_then(|n| get_node_name(n, &text));
             let child_type = child.child_by_field_name("type").and_then(|n| get_node_name(n, &text));
 
-
             if let (Some(nc), Some(tc)) = (child_name, child_type) {
                 formats.push(format!("{}:{}", nc, tc));
                 completion_items.push((nc, tc));
@@ -502,7 +428,7 @@ fn check_opcode<'a>(node: Node<'a>) -> Option<OpcodeCheck> {
 pub fn is_valid_type(type_identifier: &String) -> bool {
     let trimmed = type_identifier.trim_end_matches("[]");
     match trimmed {
-        "InstrDef" | "Instr" | "Opcode" | "Complex" => true,
+        "InstrDef" | "Instr" | "Opcode" | "OpcodeDef" | "Complex" => true,
         "a" | "i" | "k" | "S" | "f" | "w" | "b" => true,
         _ => false
     }
@@ -567,6 +493,7 @@ fn is_valid_input_udo_types(type_identifier: &String) -> bool {
 pub fn iterate_tree<'a>(
     tree: &'a Tree,
     text: &String,
+    uri: &Url
 ) -> NodeCollects<'a> {
 
     let root_node = tree.root_node().walk();
@@ -742,6 +669,24 @@ pub fn iterate_tree<'a>(
                         node: node,
                         error_type: GErrors::MissingPfield
                     });
+                }
+            },
+            "include_directive" => {
+                if let Some(c) = node.child_by_field_name("included_file") {
+                    if let Some(ifile) = get_node_name(c, &text) {
+                        let fpath = ifile.replace("\"", "");
+                        let pfile = Path::new(&fpath);
+                        let uf = UdoFile::new(&pfile, uri.clone());
+                        nodes_to_diagnostics.included_udo_files
+                            .entry(pfile.to_string_lossy().to_string())
+                            .and_modify(|m| {
+                                if m.content_hash != uf.content_hash {
+                                    m.content_hash = uf.content_hash.clone();
+                                    m.content = uf.content.clone()
+                                }
+                            })
+                            .or_insert(uf);
+                    }
                 }
             }
             // check ERROR node
@@ -939,55 +884,6 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
     AccessVariableType::Read
 }
 
-fn expand_includes(content: &str) -> String {
-    let rex = Regex::new(r#"--8<--\s+"([^"]+)""#).unwrap();
-    rex.replace_all(content, |cap: &Captures| {
-        let cap_str = &cap[1].to_string();
-        let entire_path = Path::new(cap_str);
-        let path = entire_path.file_name().and_then(|f| f.to_str()).unwrap();
-        if let Some(c) = AssetCsoundOpcodeExamples::get(path) {
-            match std::str::from_utf8(c.data.as_ref()) {
-                Ok(f) => f.to_string(),
-                Err(_) => format!("<!-- undefined includes {} -->", path)
-            }
-        } else {
-            format!("<!-- undefined includes {} -->", path)
-        }
-    }).to_string()
-}
-
-pub fn load_opcodes() -> HashMap<String, String> {
-    let mut map = HashMap::new();
-
-    for file_path in AssetCsoundOpcodeReferences::iter() {
-        let file_name = file_path.as_ref();
-        if file_name.ends_with(".md") {
-            let name = Path::new(file_name)
-                .file_stem().and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            if let Some(content_file) = AssetCsoundOpcodeReferences::get(file_name) {
-                if let Ok(content_str) = std::str::from_utf8(content_file.data.as_ref()) {
-                    let content = expand_includes(&content_str);
-
-                    let re_code = Regex::new(r"```[ \t]*csound[^\n]*").unwrap();
-                    let content = re_code.replace_all(&content, "\n```csound\n").to_string();
-
-                    let re_code = Regex::new(r"[ \t]*(```\n)").unwrap();
-                    let content = re_code.replace_all(&content, "\n```\n").to_string();
-
-                    let re = Regex::new(r"<br\s*/?>").unwrap();
-                    let content = re.replace_all(&content, "\n\n").to_string();
-
-                    map.insert(name, content);
-                }
-            }
-        }
-    }
-    map
-}
-
 fn capture_to_token_type(capture: &str) -> Option<SemanticTokenType> {
     match capture {
         "attribute"                 => Some(SemanticTokenType::DECORATOR),
@@ -1079,7 +975,16 @@ pub fn get_delta_pos(semantic_tokens: &mut Vec<(u32, u32, u32, u32, u32)>) -> Ve
     stokens
 }
 
-pub fn get_injections(query_injection: &Query, tree: &Tree, text: &String, cs_parser: &mut Parser, cs_query: &Query, py_external: &mut ExternalQuery, html_external: &mut ExternalQuery)  -> Vec<(u32, u32, u32, u32, u32)> {
+pub fn get_injections(
+    query_injection: &Query,
+    tree: &Tree,
+    text: &String,
+    cs_parser: &mut Parser,
+    cs_query: &Query,
+    py_external: &mut ExternalQuery,
+    html_external: &mut ExternalQuery
+) -> Vec<(u32, u32, u32, u32, u32)>
+{
     let mut cursor = QueryCursor::new();
     let mut qmatches = cursor.matches(&query_injection, tree.root_node(), text.as_bytes());
     let index_content = query_injection.capture_index_for_name("injection.content").unwrap();
@@ -1132,26 +1037,6 @@ pub fn get_injections(query_injection: &Query, tree: &Tree, text: &String, cs_pa
 
     }
     stokens
-}
-
-pub fn extract_manual(target_folder: &str) -> Result<(), std::io::Error>{
-    let temp_path = Path::new(target_folder);
-
-    for fpath in AssetCsoundManual::iter() {
-        let content = AssetCsoundManual::get(fpath.as_ref()).unwrap();
-        let dest = temp_path.join(fpath.as_ref());
-
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(&parent)?;
-        }
-
-        if !dest.exists() {
-            std::fs::write(dest, content.data)?;
-        }
-    }
-
-    Ok(())
-
 }
 
 pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {

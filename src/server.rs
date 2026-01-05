@@ -1,14 +1,18 @@
 use crate::parser;
+use crate::assets;
+use crate::resolve_udos;
 
 use serde_json::Value;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{ Client, LanguageServer };
 use tree_sitter::{ Tree, Query, Parser };
-use std::collections::{ HashMap, HashSet };
-use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
-use std::sync::Arc;
+use std::{
+    collections::{ HashMap, HashSet },
+    path::{ Path, PathBuf },
+    sync::Arc
+};
 
 pub struct CurrentDocument {
     pub text: String,
@@ -17,6 +21,7 @@ pub struct CurrentDocument {
     pub query_injection: Query,
     pub user_definitions: parser::UserDefinitions,
     pub cached_typed_vars: HashMap<String, String>,
+    pub cached_included_udo_files: HashMap<String, resolve_udos::UdoFile>,
     pub csound_parser: Parser,
     pub py_query: parser::ExternalQuery,
     pub html_query: parser::ExternalQuery
@@ -25,20 +30,18 @@ pub struct CurrentDocument {
 pub struct Backend {
     client: Client,
     document_state: Arc<RwLock<HashMap<Url, CurrentDocument>>>,
-    opcodes: HashMap<String, String>,
-    json_reference_completion_list: parser::CsoundJsonData,
-    manual_temp_path: Arc<RwLock<PathBuf>>
+    opcodes: Arc<RwLock<HashMap<String, String>>>,
+    json_reference_completion_list: Arc<RwLock<assets::CsoundJsonData>>,
+    manual_temp_path: Arc<RwLock<PathBuf>>,
 }
 
 impl Backend {
     pub fn new(client: Client) -> Self {
-        let opcodes = parser::load_opcodes();
-        let json_reference_completion_list = parser::read_csound_json_data();
         Self {
             client,
             document_state: Arc::new(RwLock::new(HashMap::new())),
-            opcodes,
-            json_reference_completion_list,
+            opcodes: Arc::new(RwLock::new(HashMap::new())),
+            json_reference_completion_list: Arc::new(RwLock::new(assets::CsoundJsonData::default())),
             manual_temp_path: Arc::new(RwLock::new(PathBuf::new()))
         }
     }
@@ -47,15 +50,16 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
-        let mut temp_dir = std::env::temp_dir();
-        temp_dir.push("csound_html_manual");
-
-        if let Err(e) = parser::extract_manual(temp_dir.to_str().unwrap()) {
-            self.client.log_message(MessageType::WARNING, format!("Failed to load Csound offline Manual {}", e)).await;
+        let mut op = self.opcodes.write().await;
+        let mut mp = self.manual_temp_path.write().await;
+        if let Err(e) = assets::load_manual_resources(&assets::TEMP_CSOUND_MANUAL_DIR, &mut op, &mut mp).await {
+            self.client.log_message(MessageType::WARNING, format!("Csound manual unavailable: {}", e)).await;
         }
 
-        let mut mp = self.manual_temp_path.write().await;
-        *mp = temp_dir;
+        let mut cs_references = self.json_reference_completion_list.write().await;
+        if let Err(e) = assets::read_csound_json_data(&mut cs_references, &mp).await {
+            self.client.log_message(MessageType::WARNING, format!("Csound opcodes references unavailable: {}", e)).await;
+        }
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -131,6 +135,7 @@ impl LanguageServer for Backend {
                 query_injection: parsed_tree.query_injection,
                 user_definitions: parser::UserDefinitions::new(),
                 cached_typed_vars: HashMap::new(),
+                cached_included_udo_files: HashMap::new(),
                 csound_parser: parsed_tree.csound_parser,
                 py_query: parser::ExternalQuery { parser: parsed_tree.py_parser, query: parsed_tree.query_py },
                 html_query: parser::ExternalQuery { parser: parsed_tree.html_parser, query: parsed_tree.query_html }
@@ -150,6 +155,7 @@ impl LanguageServer for Backend {
             let mut diagnostics = Vec::new();
             let mut cached_diag: HashSet<(u32, u32, String)> = HashSet::new();
             let mut d = self.document_state.write().await;
+            let opcodes = self.opcodes.read().await;
 
             if let Some(doc) = d.get_mut(&uri) {
                 let text = current_change.text;
@@ -158,15 +164,63 @@ impl LanguageServer for Backend {
                 doc.tree = parsed_tree.tree;
                 doc.query = parsed_tree.query;
                 doc.query_injection = parsed_tree.query_injection;
-                let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text);
+                let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text, &uri);
                 doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
                 doc.user_definitions = nodes_to_diagnostics.user_definitions;
 
                 parser::get_semantic_tokens(&doc.query, &doc.tree, &text, None);
 
+                for (ufile_path, ufile) in nodes_to_diagnostics.included_udo_files.iter() {
+                    let mut pflag = false;
+                    if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
+                        if entry.content_hash != ufile.content_hash {
+                            entry.content_hash = ufile.content_hash;
+                            entry.content = ufile.content.clone();
+                            pflag = true;
+                        }
+                    } else {
+                        doc.cached_included_udo_files.insert(ufile_path.clone(), ufile.clone());
+                        pflag = true;
+                    }
+
+                    if pflag {
+                        if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
+                            if let Err(e) = entry.iterate_included_udo_file(&mut doc.csound_parser) {
+                                self.client.log_message(MessageType::WARNING, e).await
+                            }
+                        }
+                    }
+                }
+
+                let ufile_to_remove: Vec<String> = {
+                    let mut to_remove = Vec::new();
+                    for (p, _) in &doc.cached_included_udo_files {
+                        if !nodes_to_diagnostics.included_udo_files.contains_key(p) {
+                            to_remove.push(p.clone());
+                        }
+                    }
+                    to_remove
+                };
+
+                for p in ufile_to_remove {
+                    doc.cached_included_udo_files.remove(&p);
+                }
+
                 for var in &doc.user_definitions.unused_vars {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
                         let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
+
+                        #[cfg(debug_assertions)]
+                        {
+                            self.client.log_message(MessageType::INFO,
+                                format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
+                                finded_node.kind(),
+                                finded_node.parent().unwrap().kind(),
+                                var.var_name,
+                                var.var_calls,
+                                var.var_scope
+                            )).await;
+                        }
 
                         let diag = Diagnostic {
                             range: parser::get_node_range(&finded_node),
@@ -192,22 +246,43 @@ impl LanguageServer for Backend {
                     if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
                         let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
 
+                        #[cfg(debug_assertions)]
+                        {
+                            self.client.log_message(MessageType::INFO,
+                                format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
+                                finded_node.kind(),
+                                finded_node.parent().unwrap().kind(),
+                                var.var_name,
+                                var.var_calls,
+                                var.var_scope
+                            )).await;
+                        }
+
                         for node_range in &var.references {
-                            let diag = Diagnostic {
-                                range: *node_range,
-                                severity: Some(DiagnosticSeverity::ERROR),
-                                source: Some("csound-lsp".into()),
-                                message: {
-                                    match parent_finded_kind {
-                                        "label_statement" => "Undefined label".to_string(),
-                                        "macro_usage" => "Undefined macro".to_string(),
-                                        _ => "Undefined variable".to_string(),
-                                    }
-                                },
-                                ..Default::default()
-                            };
-                            if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
-                                diagnostics.push(diag);
+                            let mut pflag = false;
+                            if parent_finded_kind == "macro_usage" {
+                                pflag = doc.cached_included_udo_files
+                                    .values()
+                                    .any(|v| v.macro_list.contains(&var.var_name));
+                            }
+
+                            if !pflag {
+                                let diag = Diagnostic {
+                                    range: *node_range,
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    source: Some("csound-lsp".into()),
+                                    message: {
+                                        match parent_finded_kind {
+                                            "label_statement" => "Undefined label".to_string(),
+                                            "macro_usage" => "Undefined macro".to_string(),
+                                            _ => "Undefined variable".to_string(),
+                                        }
+                                    },
+                                    ..Default::default()
+                                };
+                                if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                                    diagnostics.push(diag);
+                                }
                             }
                         }
                     }
@@ -216,9 +291,14 @@ impl LanguageServer for Backend {
                 for node in nodes_to_diagnostics.opcodes {
                     if let Some(nt) = parser::get_node_name(node, &doc.text) {
                         let node_type = nt.split_once(":").map(|(prefix, _)| prefix.to_string()).unwrap_or(nt);
-                        if !nodes_to_diagnostics.udo.contains(&node_type) && !nodes_to_diagnostics.udt.contains(&node_type) {
-                            match self.opcodes.get(&node_type) {
-                                Some(_) => {},
+
+                        let is_included_udo = doc.cached_included_udo_files
+                            .values()
+                            .any(|u| u.udo_list.contains(&node_type));
+
+                        if !nodes_to_diagnostics.udo.contains(&node_type) && !nodes_to_diagnostics.udt.contains(&node_type) && !is_included_udo {
+                            match opcodes.get(&node_type) {
+                                Some(_) => { },
                                 None => {
                                     let diag = Diagnostic {
                                         range: parser::get_node_range(&node),
@@ -238,7 +318,12 @@ impl LanguageServer for Backend {
 
                 for node in nodes_to_diagnostics.types {
                     let type_identifier = parser::get_node_name(node, &doc.text).unwrap();
-                    if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) {
+
+                    let is_type_included = doc.cached_included_udo_files
+                        .values()
+                        .any(|t| t.type_list.contains(&type_identifier));
+
+                    if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) && !is_type_included {
                         let diag = Diagnostic {
                             range: parser::get_node_range(&node),
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -252,7 +337,7 @@ impl LanguageServer for Backend {
                     }
                 }
 
-                for node in nodes_to_diagnostics.generic_errors {
+                for node in nodes_to_diagnostics.generic_errors.iter() {
                     let node_name = parser::get_node_name(node.node, &doc.text).unwrap();
                     let message = match node.error_type {
                         parser::GErrors::Syntax => {
@@ -294,11 +379,23 @@ impl LanguageServer for Backend {
             if let Some(node) = parser::find_node_at_position(&doc.tree, &pos) {
                 let node_kind = node.kind();
                 let node_type = node.utf8_text(doc.text.as_bytes()).unwrap_or("???"); // opcode key
+                let opcodes = self.opcodes.read().await;
+
+                #[cfg(debug_assertions)]
+                {
+                    self.client.log_message(MessageType::INFO,
+                        format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}",
+                        node_kind,
+                        parser::get_node_name(node, &doc.text).unwrap_or_default(),
+                        node.parent().map(|p| p.kind()).unwrap_or("None"),
+                        parser::find_scope(node, &doc.text)
+                    )).await;
+                }
 
                 match node_kind {
                     "opcode_name" => {
                         if let Some(ud) = doc.user_definitions.user_defined_opcodes.get(&node_type.to_string()) {
-                            let md = format!("## User-Defined Opcode\n```\n{}\n```", ud);
+                            let md = format!("## User-Defined Opcode\n```csound\n{}\n```", ud);
                             return Ok(Some(Hover {
                                 contents: HoverContents::Markup(MarkupContent {
                                         kind: MarkupKind::Markdown,
@@ -309,7 +406,22 @@ impl LanguageServer for Backend {
                             )
                         }
 
-                        if let Some(reference) = self.opcodes.get(node_type) {
+                        for (_, udo_file) in doc.cached_included_udo_files.iter() {
+                            if let Some(ud) = udo_file.user_defined_opcodes.get(&node_type.to_string()) {
+                                let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
+                                let md = format!("## User-Defined Opcode (from `{}`)\n```csound\n{}\n```", udo_source, ud);
+                                return Ok(Some(Hover {
+                                    contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value: md,
+                                        }),
+                                        range: None,
+                                    })
+                                )
+                            }
+                        }
+
+                        if let Some(reference) = opcodes.get(node_type) {
                             return Ok(Some(Hover {
                                 contents: HoverContents::Markup(MarkupContent {
                                         kind: MarkupKind::Markdown,
@@ -319,7 +431,9 @@ impl LanguageServer for Backend {
                                 })
                             )
                         } else {
-                            self.client.log_message(MessageType::WARNING, format!("Manual not found for opcode {}", node_type)).await;
+                            self.client.log_message(MessageType::WARNING,
+                                format!("Manual not found for opcode {}", node_type)
+                            ).await;
                         }
                     },
                     "identifier" => {
@@ -330,7 +444,7 @@ impl LanguageServer for Backend {
                         if is_type {
                             if let Some(child_type_name) = parser::get_node_name(node, &doc.text) {
                                 if let Some(sd) = doc.user_definitions.user_defined_types.get(&child_type_name) {
-                                    let md = format!("## User-Defined Type\n```\n{}\n```", sd.udt_format);
+                                    let md = format!("## User-Defined Type\n```csound\n{}\n```", sd.udt_format);
                                     return Ok(Some(Hover {
                                         contents: HoverContents::Markup(MarkupContent {
                                                 kind: MarkupKind::Markdown,
@@ -341,8 +455,23 @@ impl LanguageServer for Backend {
                                     )
                                 }
 
+                                for (_, udo_file) in doc.cached_included_udo_files.iter() {
+                                    if let Some(sd) = udo_file.user_defined_types.get(&node_type.to_string()) {
+                                        let udo_source = udo_file.path.file_name().unwrap();
+                                        let md = format!("## User-Defined Type (from `{:?}`)\n```csound\n{}\n```", udo_source, sd.udt_format);
+                                        return Ok(Some(Hover {
+                                            contents: HoverContents::Markup(MarkupContent {
+                                                    kind: MarkupKind::Markdown,
+                                                    value: md,
+                                                }),
+                                                range: None,
+                                            })
+                                        )
+                                    }
+                                }
+
                                 let splitted_name = node_type.split_once(":").map(|(p, _)| p).unwrap_or(node_type);
-                                if let Some(reference) = self.opcodes.get(splitted_name) {
+                                if let Some(reference) = opcodes.get(splitted_name) {
                                     return Ok(Some(Hover {
                                         contents: HoverContents::Markup(MarkupContent {
                                                 kind: MarkupKind::Markdown,
@@ -370,6 +499,7 @@ impl LanguageServer for Backend {
         let dc = self.document_state.read().await;
         if let Some(doc) = dc.get(&uri) {
             if let Some(node) = parser::find_node_at_position(&doc.tree, &pos) {
+                let jr = self.json_reference_completion_list.read().await;
                 match node.kind() {
                     "struct_access" => {
                         let mut variable_name = String::new();
@@ -377,27 +507,48 @@ impl LanguageServer for Backend {
                             variable_name = parser::get_node_name(obj_node, &doc.text).unwrap_or_default();
                         }
                         if !variable_name.is_empty() {
+                            let mut items: Vec<CompletionItem> = Vec::new();
                             if let Some(struct_type_name) = doc.cached_typed_vars.get(&variable_name) {
                                 if let Some(udt) = doc.user_definitions.user_defined_types.get(&struct_type_name.clone()) {
                                     if let Some(ref members) = udt.udt_members {
-                                        let items: Vec<CompletionItem> = members
-                                            .iter()
-                                            .map(|(field_name, field_type)| {
-                                                CompletionItem {
+                                        for (field_name, field_type) in members.iter() {
+                                            let compl = CompletionItem {
+                                                label: field_name.clone(),
+                                                kind: Some(CompletionItemKind::FIELD),
+                                                detail: Some(format!(": {}", field_type)),
+                                                insert_text: Some(field_name.clone()),
+                                                documentation: Some(Documentation::String(format!(
+                                                    "Field of struct '{}' (Type: {})",
+                                                    variable_name, struct_type_name
+                                                ))),
+                                                ..Default::default()
+                                            };
+                                            items.push(compl);
+                                        }
+                                    }
+                                }
+                                for (_, udo_file) in doc.cached_included_udo_files.iter() {
+                                    if let Some(udt) = udo_file.user_defined_types.get(&struct_type_name.clone()) {
+                                        if let Some(ref members) = udt.udt_members {
+                                            for (field_name, field_type) in members.iter() {
+                                                let compl = CompletionItem {
                                                     label: field_name.clone(),
                                                     kind: Some(CompletionItemKind::FIELD),
                                                     detail: Some(format!(": {}", field_type)),
                                                     insert_text: Some(field_name.clone()),
                                                     documentation: Some(Documentation::String(format!(
-                                                        "Field of struct '{}' (Type: {})",
-                                                        variable_name, struct_type_name
+                                                        "Field of struct '{}' (Type: {}) (from {:?})",
+                                                        variable_name, struct_type_name, udo_file.path.file_name().unwrap()
                                                     ))),
                                                     ..Default::default()
-                                                }
-                                            })
-                                            .collect();
-                                        return Ok(Some(CompletionResponse::Array(items)))
+                                                };
+                                                items.push(compl);
+                                            }
+                                        }
                                     }
+                                }
+                                if !items.is_empty() {
+                                    return Ok(Some(CompletionResponse::Array(items)))
                                 }
                             }
                         }
@@ -407,53 +558,92 @@ impl LanguageServer for Backend {
                         if let Some(wnode) = parser::find_node_at_cursor(&doc.tree, &pos, &doc.text) {
                             let op_name = parser::get_node_name(wnode, &doc.text).unwrap_or("".to_string());
 
+                            #[cfg(debug_assertions)]
+                            {
+                                let p = wnode.parent().map(|p| p.kind()).unwrap();
+                                self.client.log_message(MessageType::INFO,
+                                    format!("COMPLETION DEBUG: Name={} Kind={} Parent={}", op_name, wnode.kind(), p)).await;
+                            }
+
                             match wnode.kind() {
                                 ":" => {
                                     let mut v = HashSet::new();
-                                    let types = vec!["a", "i", "k", "b", "S", "f", "w", "InstrDef", "Instr", "Opcode", "Complex"];
+                                    let types = vec![
+                                        "a", "i", "k", "b", "S", "f", "w",
+                                        "InstrDef", "Instr", "Opcode", "OpcodeDef", "Complex"
+                                    ];
                                     v.extend(types);
+
                                     for (_, udt) in doc.user_definitions.user_defined_types.iter() {
                                         v.insert(udt.udt_name.as_str());
                                     }
 
                                     let total_types: Vec<&str> = v.into_iter().collect();
-                                    let items: Vec<CompletionItem> = total_types
-                                        .iter()
-                                        .map(|ty| {
-                                            CompletionItem {
+                                    let mut items: Vec<CompletionItem> = Vec::new();
+                                    for ty in total_types.iter() {
+                                        items.push(CompletionItem {
+                                            label: ty.to_string(),
+                                            kind: Some(CompletionItemKind::FIELD),
+                                            detail: Some(format!("{}", ty)),
+                                            insert_text: Some(ty.to_string()),
+                                            documentation: Some(Documentation::String(format!("Data type '{}'", ty))),
+                                            ..Default::default()
+                                        });
+                                    }
+
+                                    for (_, udo_file) in doc.cached_included_udo_files.iter() {
+                                        for ty in udo_file.type_list.iter() {
+                                            items.push(CompletionItem {
                                                 label: ty.to_string(),
                                                 kind: Some(CompletionItemKind::FIELD),
                                                 detail: Some(format!("{}", ty)),
                                                 insert_text: Some(ty.to_string()),
-                                                documentation: Some(Documentation::String(format!("Data type '{}'", ty))),
+                                                documentation: Some(Documentation::String(
+                                                    format!("Data type '{}' (from {:?})", ty, udo_file.path.file_name())
+                                                )),
                                                 ..Default::default()
-                                            }
-                                        })
-                                        .collect();
+                                            });
+                                        }
+                                    }
+
                                     return Ok(Some(CompletionResponse::Array(items)))
                                 },
                                 "$" => {
                                     let mut items = Vec::new();
                                     for (_, value) in doc.user_definitions.user_defined_macros.iter() {
                                         items.push(CompletionItem {
-                                            label: value.macro_label.clone(),
-                                            kind: Some(CompletionItemKind::FIELD),
-                                            detail: Some(format!("# {} #", value.macro_values)),
-                                            insert_text: Some(value.macro_name.clone()),
-                                            documentation: Some(Documentation::String("user defined macro".to_string())),
-                                            ..Default::default()
+                                                label: value.macro_label.clone(),
+                                                kind: Some(CompletionItemKind::FIELD),
+                                                detail: Some(format!("# {} #", value.macro_values)),
+                                                insert_text: Some(value.macro_name.clone()),
+                                                documentation: Some(Documentation::String("user defined macro".to_string())),
+                                                ..Default::default()
                                             }
                                         );
                                     }
-                                    if let Some(omacros) = &self.json_reference_completion_list.omacros_data {
+                                    for (_, udo_file) in doc.cached_included_udo_files.iter() {
+                                        for (_, value) in udo_file.user_defined_macros.iter() {
+                                            let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
+                                            items.push(CompletionItem {
+                                                    label: value.macro_label.clone(),
+                                                    kind: Some(CompletionItemKind::FIELD),
+                                                    detail: Some(format!("# {} #", value.macro_values)),
+                                                    insert_text: Some(value.macro_name.clone()),
+                                                    documentation: Some(Documentation::String(format!("user defined macro (from {})", udo_source).to_string())),
+                                                    ..Default::default()
+                                                }
+                                            );
+                                        }
+                                    }
+                                    if let Some(ref omacros) = jr.omacros_data {
                                         for (omacro, macro_value) in omacros {
                                             items.push(CompletionItem {
-                                                label: omacro.clone(),
-                                                kind: Some(CompletionItemKind::FIELD),
-                                                detail: Some(format!("value: {}", macro_value.value)),
-                                                insert_text: Some(omacro.clone()),
-                                                documentation: Some(Documentation::String(format!("equivalent to: {}", macro_value.equivalent_to))),
-                                                ..Default::default()
+                                                    label: omacro.clone(),
+                                                    kind: Some(CompletionItemKind::FIELD),
+                                                    detail: Some(format!("value: {}", macro_value.value)),
+                                                    insert_text: Some(omacro.clone()),
+                                                    documentation: Some(Documentation::String(format!("equivalent to: {}", macro_value.equivalent_to))),
+                                                    ..Default::default()
                                                 }
                                             );
                                         }
@@ -464,22 +654,22 @@ impl LanguageServer for Backend {
                                     return Ok(None)
                                 },
                                 "flag_identifier" => {
-                                    if let Some(ref list) = self.json_reference_completion_list.oflag_data {
+                                    if let Some(ref list) = jr.oflag_data {
                                         let mut items = Vec::new();
                                         for (_, data) in list {
                                             let data_body = data.get_string_from_body();
                                             let slice_body: String = String::from(&data_body[1..]);
                                             items.push(CompletionItem {
-                                                label: data.prefix.clone(),
-                                                kind: Some(CompletionItemKind::FIELD),
-                                                insert_text: Some(slice_body),
-                                                documentation: Some(Documentation::MarkupContent(
-                                                    MarkupContent {
-                                                        kind: MarkupKind::Markdown,
-                                                        value: data.description.clone()
-                                                    }
-                                                )),
-                                                ..Default::default()
+                                                    label: data.prefix.clone(),
+                                                    kind: Some(CompletionItemKind::FIELD),
+                                                    insert_text: Some(slice_body),
+                                                    documentation: Some(Documentation::MarkupContent(
+                                                        MarkupContent {
+                                                            kind: MarkupKind::Markdown,
+                                                            value: data.description.clone()
+                                                        }
+                                                    )),
+                                                    ..Default::default()
                                                 }
                                             )
                                         }
@@ -500,7 +690,7 @@ impl LanguageServer for Backend {
                                                 pkind != "ERROR"
                                             }
                                             {
-                                                if let Some(ref list) = self.json_reference_completion_list.opcodes_data {
+                                                if let Some(ref list) = jr.opcodes_data {
                                                     let mut items = Vec::new();
                                                     for (n, data) in list {
                                                         if n.starts_with(&op_name) {

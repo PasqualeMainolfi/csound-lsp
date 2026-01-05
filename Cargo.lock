@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "csound-lsp"
-version = "1.0.41"
+version = "1.0.5"
 dependencies = [
  "lsp-server",
  "regex",
