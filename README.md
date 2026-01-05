@@ -29,6 +29,4 @@ and then move from `target/release/csound-lsp` somewhere in your PATH.
 
 **Current Status**
 This project is under active development.  
-Many features are incomplete or experimental, and breaking changes are expected.  
-
-![img_example](img_examples/img1.png)
+Many features are incomplete or experimental, and breaking changes are expected.
