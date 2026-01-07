@@ -2,6 +2,7 @@
 
 use crate::utils::{ SEMANTIC_TOKENS, OMACROS, OPEN_BLOCKS, CLOSE_BLOCKS };
 use crate::resolve_udos::UdoFile;
+use crate::assets;
 use regex::{ Regex, Captures };
 
 use rust_embed::{ EmbeddedFile, RustEmbed };
@@ -1060,4 +1061,18 @@ pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
         }
     }
     indent
+}
+
+pub async fn add_local_udos_to_cs_references(udos: &HashMap<String, String>, cs_references: &mut assets::CsoundJsonData) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let opdata = cs_references.opcodes_data.as_mut().ok_or("Internal opcode cache corrupted!")?;
+    for (udo, prefix) in udos.iter() {
+        if let None = opdata.get(udo) {
+            opdata.insert(udo.clone(), assets::OpcodesData {
+                prefix: prefix.strip_prefix("opcode ").unwrap().to_string(),
+                body: assets::BodyOpCompletion::SingleLine(udo.clone()),
+                description: format!("user-defined opcode" )
+            });
+        }
+    }
+    Ok(())
 }

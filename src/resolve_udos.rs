@@ -1,6 +1,8 @@
+use crate::{
+    assets::{self, BodyOpCompletion, OpcodesData}, parser::{self, UserDefinedMacro, UserDefinedType }
+};
 use tree_sitter::Parser;
 use tower_lsp::lsp_types::Url;
-use crate::parser::{self, UserDefinedType, UserDefinedMacro };
 
 use std::{
     collections::{HashMap, HashSet},
@@ -141,4 +143,23 @@ impl UdoFile {
         }
         Ok(())
     }
+}
+
+pub async fn add_included_udos_to_cs_references(udos: &HashMap<String, UdoFile>, cs_references: &mut assets::CsoundJsonData) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let opdata = cs_references.opcodes_data.as_mut().ok_or("Internal opcode cache corrupted!")?;
+    for (_, udo_file) in udos.iter() {
+        let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
+        for udo in udo_file.udo_list.iter() {
+            if let Some(body) = udo_file.user_defined_opcodes.get(udo) {
+                if let None = opdata.get(udo) {
+                    opdata.insert(udo.clone(), OpcodesData {
+                        prefix: body.strip_prefix("opcode ").unwrap().to_string(),
+                        body: BodyOpCompletion::SingleLine(udo.clone()),
+                        description: format!("included user-defined opcode from {}", udo_source)
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }

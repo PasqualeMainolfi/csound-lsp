@@ -3,6 +3,7 @@ mod parser;
 mod utils;
 mod assets;
 mod resolve_udos;
+mod resolve_pulgins;
 
 use tower_lsp::{ LspService, Server };
 use server::Backend;

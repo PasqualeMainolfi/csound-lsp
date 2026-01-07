@@ -1,4 +1,9 @@
+use std::time::Duration;
+use std::path::Path;
+use std::io;
 use tower_lsp::lsp_types::SemanticTokenType;
+use serde::Deserialize;
+use zip::ZipArchive;
 
 
 pub const SEMANTIC_TOKENS: &[SemanticTokenType] = &[
@@ -68,3 +73,69 @@ pub const CLOSE_BLOCKS: [&'static str; 16] = [
     "default_header",
     "}"
 ];
+
+
+#[derive(Deserialize)]
+pub struct ReleaseTag {
+    tag_name: String
+}
+
+pub async fn get_release_tag_from_github(github_api_latest: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent("csound-lsp")
+        .build()?;
+
+    let release: ReleaseTag = client
+        .get(github_api_latest)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    Ok(release.tag_name)
+}
+
+pub async fn download_from_github(url: &str, temp_path: &Path, local_file: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let response = reqwest::get(url).await?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download from {} failed: {}", url, response.status()).into());
+    }
+
+    let zip_file = temp_path.join(local_file);
+    let mut file = tokio::fs::File::create(zip_file).await?;
+    let bytes = response.bytes().await?;
+    tokio::io::AsyncWriteExt::write_all(&mut file, &bytes).await?;
+
+    Ok(())
+}
+
+pub fn unzip_file(zip_archive_path: &Path, dir_name: &Path) -> io::Result<()> {
+    let file = std::fs::File::open(zip_archive_path)?;
+    let mut archive = ZipArchive::new(file)?;
+
+    archive.extract(dir_name)?;
+    std::fs::remove_file(&zip_archive_path)?;
+
+    Ok(())
+}
+
+pub async fn copy_dir_recursively(src: &Path, dest: &Path) -> std::io::Result<()> {
+    if !dest.exists() {
+        tokio::fs::create_dir_all(&dest).await?;
+    }
+
+    let mut entries = tokio::fs::read_dir(&src).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let epath = entry.path();
+        let dest_path = dest.join(&entry.file_name());
+        if epath.is_dir() {
+            Box::pin(copy_dir_recursively(&epath, &dest_path)).await?;
+        } else {
+            tokio::fs::copy(&epath, &dest_path).await?;
+        }
+    }
+
+   Ok(())
+}

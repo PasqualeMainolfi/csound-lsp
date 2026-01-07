@@ -1,6 +1,9 @@
-use crate::parser;
-use crate::assets;
-use crate::resolve_udos;
+use crate::{
+    parser,
+    assets,
+    resolve_udos,
+    resolve_pulgins
+};
 
 use serde_json::Value;
 use tower_lsp::jsonrpc::Result;
@@ -13,6 +16,8 @@ use std::{
     path::{ Path, PathBuf },
     sync::Arc
 };
+
+const GLOBAL_TEMP_DIR: &str = "csound-lsp_temp_folder";
 
 pub struct CurrentDocument {
     pub text: String,
@@ -33,6 +38,7 @@ pub struct Backend {
     opcodes: Arc<RwLock<HashMap<String, String>>>,
     json_reference_completion_list: Arc<RwLock<assets::CsoundJsonData>>,
     manual_temp_path: Arc<RwLock<PathBuf>>,
+    plugins_opcodes: Arc<RwLock<HashMap<String, resolve_pulgins::CsoundPlugin>>>
 }
 
 impl Backend {
@@ -42,7 +48,8 @@ impl Backend {
             document_state: Arc::new(RwLock::new(HashMap::new())),
             opcodes: Arc::new(RwLock::new(HashMap::new())),
             json_reference_completion_list: Arc::new(RwLock::new(assets::CsoundJsonData::default())),
-            manual_temp_path: Arc::new(RwLock::new(PathBuf::new()))
+            manual_temp_path: Arc::new(RwLock::new(PathBuf::new())),
+            plugins_opcodes: Arc::new(RwLock::new(HashMap::new()))
         }
     }
 }
@@ -50,15 +57,40 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+        let mut global_temp = std::env::temp_dir();
+        global_temp.push(GLOBAL_TEMP_DIR);
+
+        let mut plugin_opcodes = self.plugins_opcodes.write().await;
+        match resolve_pulgins::find_installed_plugins().await {
+            Ok(plugs) => {
+                let p_installed = plugs.iter().cloned().collect::<Vec<String>>().join(", ");
+                self.client.log_message(MessageType::INFO, format!("Installed plugins: {}", p_installed)).await;
+                if let Err(e) = resolve_pulgins::load_plugins_resources(&mut global_temp, &plugs, &mut plugin_opcodes).await {
+                    self.client.log_message(MessageType::WARNING, format!("Impossible to load plugins: {}", e)).await
+                };
+            },
+            Err(e) => {
+                self.client.log_message(MessageType::INFO, format!("Installed plugins: {}", e)).await
+            }
+        };
+
+        let keys = &plugin_opcodes.keys().cloned().collect::<Vec<String>>().join(", ");
+        self.client.log_message(MessageType::INFO, format!("Loaded plugins: {}", keys)).await;
+
         let mut op = self.opcodes.write().await;
         let mut mp = self.manual_temp_path.write().await;
-        if let Err(e) = assets::load_manual_resources(&assets::TEMP_CSOUND_MANUAL_DIR, &mut op, &mut mp).await {
+        if let Err(e) = assets::load_manual_resources(&mut global_temp, &mut op, &mut mp).await {
             self.client.log_message(MessageType::WARNING, format!("Csound manual unavailable: {}", e)).await;
         }
 
         let mut cs_references = self.json_reference_completion_list.write().await;
         if let Err(e) = assets::read_csound_json_data(&mut cs_references, &mp).await {
             self.client.log_message(MessageType::WARNING, format!("Csound opcodes references unavailable: {}", e)).await;
+        }
+
+        // add plugins in cs_references for completion
+        if let Err(e) = resolve_pulgins::add_plugins_to_cs_references(&plugin_opcodes, &mut cs_references).await {
+            self.client.log_message(MessageType::WARNING, format!("Plugins opcodes: {}", e)).await;
         }
 
         Ok(InitializeResult {
@@ -167,6 +199,17 @@ impl LanguageServer for Backend {
                 let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text, &uri);
                 doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
                 doc.user_definitions = nodes_to_diagnostics.user_definitions;
+
+                // add external udo to cs_references
+                let mut jr = self.json_reference_completion_list.write().await;
+                if let Err(e) = resolve_udos::add_included_udos_to_cs_references(&doc.cached_included_udo_files, &mut jr).await {
+                    self.client.log_message(MessageType::WARNING, format!("Included User-Defined opcodes: {}", e)).await;
+                }
+
+                // add local udo to cs_references
+                if let Err(e) = parser::add_local_udos_to_cs_references(&doc.user_definitions.user_defined_opcodes, &mut jr).await {
+                    self.client.log_message(MessageType::WARNING, format!("Included User-Defined opcodes: {}", e)).await;
+                }
 
                 parser::get_semantic_tokens(&doc.query, &doc.tree, &text, None);
 
@@ -296,7 +339,14 @@ impl LanguageServer for Backend {
                             .values()
                             .any(|u| u.udo_list.contains(&node_type));
 
-                        if !nodes_to_diagnostics.udo.contains(&node_type) && !nodes_to_diagnostics.udt.contains(&node_type) && !is_included_udo {
+                        let plugins = self.plugins_opcodes.read().await;
+
+                        if {
+                            !nodes_to_diagnostics.udo.contains(&node_type) &&
+                            !nodes_to_diagnostics.udt.contains(&node_type) &&
+                            !plugins.contains_key(&node_type)              &&
+                            !is_included_udo
+                        } {
                             match opcodes.get(&node_type) {
                                 Some(_) => { },
                                 None => {
@@ -380,6 +430,7 @@ impl LanguageServer for Backend {
                 let node_kind = node.kind();
                 let node_type = node.utf8_text(doc.text.as_bytes()).unwrap_or("???"); // opcode key
                 let opcodes = self.opcodes.read().await;
+                let plugins = self.plugins_opcodes.read().await;
 
                 #[cfg(debug_assertions)]
                 {
@@ -419,6 +470,18 @@ impl LanguageServer for Backend {
                                     })
                                 )
                             }
+                        }
+
+                        if let Some(plug) = plugins.get(node_type) {
+                            let pdoc = format!("## Plugin Opcodes (from `{}`)\n{}", plug.libname, plug.documentation);
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                        kind: MarkupKind::Markdown,
+                                        value: pdoc,
+                                    }),
+                                    range: None,
+                                })
+                            )
                         }
 
                         if let Some(reference) = opcodes.get(node_type) {

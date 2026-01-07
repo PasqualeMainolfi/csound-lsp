@@ -1,17 +1,14 @@
-use std::{
-    io,
-    path::{ Path, PathBuf },
-    time::Duration
-};
+use crate::utils;
+
+use std::path::{ Path, PathBuf };
 use regex::{ Regex, Captures };
 use std::collections::HashMap;
-use reqwest;
-use zip::ZipArchive;
 use serde::Deserialize;
 
+
 pub const TEMP_CSOUND_MANUAL_DIR: &str = "temp_csound_manual";
-pub const GITHUB_LATEST_API: &str = "https://api.github.com/repos/PasqualeMainolfi/csound_manual/releases/latest";
-pub const GITHUB_DOWNLOAD_BASE: &str = "https://github.com/PasqualeMainolfi/csound_manual/releases/download";
+pub const GITHUB_LATEST_API_MANUAL: &str = "https://api.github.com/repos/PasqualeMainolfi/csound_manual/releases/latest";
+pub const GITHUB_DOWNLOAD_BASE_MANUAL: &str = "https://github.com/PasqualeMainolfi/csound_manual/releases/download";
 pub const ASSET_NAME: &str = "csound_manual-html.zip";
 pub const OPCODES_MD_DIR: &str = "csound_resources/opcodes";
 pub const EXAMPLES_DIR: &str = "csound_resources/examples";
@@ -19,58 +16,14 @@ pub const OPCODES_QUERY: &str = "csound_resources/csound.json";
 pub const FLAGS_QUERY: &str = "csound_resources/flags.json";
 pub const MACROS_QUERY: &str = "csound_resources/macros.json";
 
-#[derive(Deserialize)]
-pub struct ManualTag {
-    tag_name: String
-}
-
-async fn get_release_tag() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .user_agent("csound-lsp")
-        .build()?;
-
-    let release: ManualTag = client
-        .get(GITHUB_LATEST_API)
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    Ok(release.tag_name)
-}
-
-async fn download_manual(url: &str, temp_path: &Path, release_tag: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let response = reqwest::get(url).await?;
-
-    if !response.status().is_success() {
-        return Err(format!("Download from {} failed: {}", url, response.status()).into());
-    }
-
-    // local path not ci
-    let zip_manual_file = temp_path.join(format!("csound_manual-html_{}.zip", release_tag));
-    let mut file = tokio::fs::File::create(zip_manual_file).await?;
-    let bytes = response.bytes().await?;
-    tokio::io::AsyncWriteExt::write_all(&mut file, &bytes).await?;
-
-    Ok(())
-}
-
-fn unzip_file(zip_archive_path: &Path, maual_dir_name: &Path) -> io::Result<()> {
-    let file = std::fs::File::open(zip_archive_path)?;
-    let mut archive = ZipArchive::new(file)?;
-
-    archive.extract(maual_dir_name)?;
-    std::fs::remove_file(&zip_archive_path)?;
-
-    Ok(())
-}
-
 fn load_opcodes(opcodes_folder: &Path, examples_folder: &Path) -> HashMap<String, String> {
     let mut map = HashMap::new();
 
     let iter_dir = std::fs::read_dir(&opcodes_folder).ok();
     if let Some(d) = iter_dir {
+        let re_csound = Regex::new(r"```[ \t]*csound[^\n]*").unwrap();
+        let re_n = Regex::new(r"[ \t]*(```\n)").unwrap();
+        let re_bs = Regex::new(r"<br\s*/?>").unwrap();
         for entry in d {
             let entry = entry.ok();
             if let Some(f) = entry {
@@ -85,15 +38,9 @@ fn load_opcodes(opcodes_folder: &Path, examples_folder: &Path) -> HashMap<String
 
                     if let Some(content_file) = file_to_string {
                         let content = expand_includes(&content_file, &examples_folder);
-
-                        let re_code = Regex::new(r"```[ \t]*csound[^\n]*").unwrap();
-                        let content = re_code.replace_all(&content, "\n```csound\n").to_string();
-
-                        let re_code = Regex::new(r"[ \t]*(```\n)").unwrap();
-                        let content = re_code.replace_all(&content, "\n```\n").to_string();
-
-                        let re = Regex::new(r"<br\s*/?>").unwrap();
-                        let content = re.replace_all(&content, "\n\n").to_string();
+                        let content = re_csound.replace_all(&content, "\n```csound\n").to_string();
+                        let content = re_n.replace_all(&content, "\n```\n").to_string();
+                        let content = re_bs.replace_all(&content, "\n\n").to_string();
 
                         map.insert(name, content);
                     }
@@ -119,12 +66,11 @@ fn expand_includes(content: &str, examples_folder: &Path) -> String {
 }
 
 pub async fn load_manual_resources(
-    temp_folder_name: &str, json_opcodes: &mut HashMap<String, String>, temp_manual_path: &mut PathBuf
-) -> Result<(), Box<dyn std::error::Error + Sync + Send>>{
-    let mut temp_dir = std::env::temp_dir();
-    temp_dir.push(temp_folder_name);
+    global_temp: &mut Path, json_opcodes: &mut HashMap<String, String>, temp_manual_path: &mut PathBuf
+) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
+    let temp_dir = global_temp.join(TEMP_CSOUND_MANUAL_DIR);
 
-    let check_release_tag = get_release_tag().await;
+    let check_release_tag = utils::get_release_tag_from_github(GITHUB_LATEST_API_MANUAL).await;
     let release_tag = match check_release_tag {
         Ok(tag) => tag,
         Err(_) => "v-error".to_string() // verify prec version
@@ -140,8 +86,9 @@ pub async fn load_manual_resources(
 
         let _ = tokio::fs::create_dir_all(&temp_dir).await;
 
-        let download_url = format!("{}/{}/{}", GITHUB_DOWNLOAD_BASE, release_tag, ASSET_NAME);
-        download_manual(&download_url, &temp_dir, &release_tag).await?;
+        let download_url = format!("{}/{}/{}", GITHUB_DOWNLOAD_BASE_MANUAL, release_tag, ASSET_NAME);
+        let local_file = temp_dir.join(format!("csound_manual-html_{}.zip", release_tag));
+        utils::download_from_github(&download_url, &temp_dir, &local_file).await?;
 
         let zip_name = format!("csound_manual-html_{}.zip", release_tag);
         let zip_archive_path = temp_dir.join(zip_name);
@@ -149,7 +96,7 @@ pub async fn load_manual_resources(
 
         tokio::task::spawn_blocking(move || {
             if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
-            unzip_file(&zip_archive_path, &target_dir)
+            utils::unzip_file(&zip_archive_path, &target_dir)
         }).await??;
 
     }
