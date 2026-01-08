@@ -16,39 +16,38 @@ pub const OPCODES_QUERY: &str = "csound_resources/csound.json";
 pub const FLAGS_QUERY: &str = "csound_resources/flags.json";
 pub const MACROS_QUERY: &str = "csound_resources/macros.json";
 
-fn load_opcodes(opcodes_folder: &Path, examples_folder: &Path) -> HashMap<String, String> {
+fn load_opcodes(opcodes_folder: &Path, examples_folder: &Path) -> std::io::Result<HashMap<String, String>> {
     let mut map = HashMap::new();
 
-    let iter_dir = std::fs::read_dir(&opcodes_folder).ok();
-    if let Some(d) = iter_dir {
-        let re_csound = Regex::new(r"```[ \t]*csound[^\n]*").unwrap();
-        let re_n = Regex::new(r"[ \t]*(```\n)").unwrap();
-        let re_bs = Regex::new(r"<br\s*/?>").unwrap();
-        for entry in d {
-            let entry = entry.ok();
-            if let Some(f) = entry {
-                let file = f.path();
-                if file.extension().and_then(|e| e.to_str()) == Some("md") {
-                    let name = file
-                        .file_stem().and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_string();
+    let re_csound = Regex::new(r"```[ \t]*csound[^\n]*").unwrap();
+    let re_n = Regex::new(r"[ \t]*(```\n)").unwrap();
+    let re_bs = Regex::new(r"<br\s*/?>").unwrap();
 
-                    let file_to_string = std::fs::read_to_string(&file).ok();
+    for entry in std::fs::read_dir(&opcodes_folder)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue
+        };
 
-                    if let Some(content_file) = file_to_string {
-                        let content = expand_includes(&content_file, &examples_folder);
-                        let content = re_csound.replace_all(&content, "\n```csound\n").to_string();
-                        let content = re_n.replace_all(&content, "\n```\n").to_string();
-                        let content = re_bs.replace_all(&content, "\n\n").to_string();
+        let epath = entry.path();
 
-                        map.insert(name, content);
-                    }
-                }
-            }
+        if epath.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
+
+        let ename = match epath.file_stem().and_then(|e| e.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue
+        };
+
+        if let Some(content) = std::fs::read_to_string(&epath).ok() {
+            let content = expand_includes(&content, &examples_folder);
+            let content = re_csound.replace_all(&content, "\n```csound\n").to_string();
+            let content = re_n.replace_all(&content, "\n```\n").to_string();
+            let content = re_bs.replace_all(&content, "\n\n").to_string();
+
+            map.insert(ename, content);
         }
     }
-    map
+    Ok(map)
 }
 
 fn expand_includes(content: &str, examples_folder: &Path) -> String {
@@ -105,9 +104,9 @@ pub async fn load_manual_resources(
     let ex_path = manual_dir_path.join(&EXAMPLES_DIR);
 
     if op_path.exists() {
-        let opcodes = load_opcodes(&op_path, &ex_path);
-
-        *json_opcodes = opcodes;
+        if let Ok(opcodes) = load_opcodes(&op_path, &ex_path) {
+            *json_opcodes = opcodes;
+        }
         *temp_manual_path = manual_dir_path.clone();
     }
 

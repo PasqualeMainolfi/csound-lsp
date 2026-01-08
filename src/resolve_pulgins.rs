@@ -244,12 +244,17 @@ pub async fn load_plugins_resources(
 
 fn load_plugins_opcodes(src_path: &Path, opcodes_path: &Path, installed_plugins: &HashSet<String>) -> std::io::Result<HashMap<String, CsoundPlugin>> {
     let mut map = HashMap::new();
+
     let re_csound = Regex::new(r"```[ \t]*csound[^\n]*").unwrap();
     let re_n = Regex::new(r"[ \t]*(```\n)").unwrap();
     let re_bs = Regex::new(r"<br\s*/?>").unwrap();
 
     for entry in std::fs::read_dir(&src_path)? {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue
+        };
+
         let epath = entry.path();
 
         if !epath.is_dir() || !epath.join("risset.json").exists() { continue; }
@@ -275,11 +280,16 @@ fn load_plugins_opcodes(src_path: &Path, opcodes_path: &Path, installed_plugins:
 
         let Some((libname, _)) = libplugin else { continue };
 
-        let m = std::fs::read_to_string(&manifest_file)?;
+        let m = match std::fs::read_to_string(&manifest_file) {
+            Ok(readed) => readed,
+            Err(_) => continue
+        };
+
         let popcodes = match serde_json::from_str::<CsoundPluginOpcodes>(&m) {
             Ok(ops) => ops.opcodes,
             Err(_) => continue
         };
+
         for opcode in popcodes.iter() {
             if !map.contains_key(opcode) {
                 let doc_path = opcodes_path.join(format!("{}.md", opcode));
