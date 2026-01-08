@@ -169,7 +169,12 @@ pub async fn find_installed_plugins() -> Result<HashSet<String>, Box<dyn std::er
 
     let mut plugins = HashSet::new();
     for entry in std::fs::read_dir(&path)? {
-        let entry = entry?;
+
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue
+        };
+
         let plug_path = entry.path();
         if plug_path.extension().and_then(|e| e.to_str()) == Some(ext) {
             let pname = plug_path.file_name().unwrap().to_string_lossy().to_string();
@@ -191,41 +196,52 @@ pub async fn load_plugins_resources(
         Err(_) => "v-error".to_string() // verify prec version
     };
 
-    let dir_name = format!("csound-plugins_{}", &release_tag);
-    let plugins_dir_path = temp_dir.join(&dir_name);
+    let mut is_v_error = true;
+    let mut plugins_dir_path = temp_dir.clone();
 
-    if !plugins_dir_path.exists() && release_tag != "v-error" {
-        if temp_dir.exists() {
-            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-        }
+    if release_tag != "v-error" {
+        is_v_error = false;
 
-        let _ = tokio::fs::create_dir_all(&temp_dir).await;
+        let dir_name = format!("csound-plugins_{}", &release_tag);
+        plugins_dir_path = plugins_dir_path.join(&dir_name);
 
-        let download_url = format!("{}/{}.zip", GITHUB_DOWNLOAD_BASE_PLUGINS, release_tag);
-        let local_file = temp_dir.join(format!("csound-plugins_{}.zip", release_tag));
-        utils::download_from_github(&download_url, &temp_dir, &local_file).await?;
+        if !plugins_dir_path.exists() {
+            if temp_dir.exists() {
+                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            }
 
-        let zip_name = format!("csound-plugins_{}.zip", release_tag);
-        let zip_archive_path = temp_dir.join(zip_name);
-        let target_dir = plugins_dir_path.clone();
+            let _ = tokio::fs::create_dir_all(&temp_dir).await;
 
-        tokio::task::spawn_blocking(move || {
-            if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
-            utils::unzip_file(&zip_archive_path, &target_dir)
-        }).await??;
+            let download_url = format!("{}/{}.zip", GITHUB_DOWNLOAD_BASE_PLUGINS, release_tag);
+            let local_file = temp_dir.join(format!("csound-plugins_{}.zip", release_tag));
+            utils::download_from_github(&download_url, &temp_dir, &local_file).await?;
 
-        let mut entries = tokio::fs::read_dir(&plugins_dir_path).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let epath = entry.path();
-            if epath.is_dir() {
-                if let Some(fname) = epath.file_name().and_then(|n| n.to_str()) {
-                    if fname.starts_with("csound-plugins-") {
-                        utils::copy_dir_recursively(&epath, &plugins_dir_path).await?;
-                        tokio::fs::remove_dir_all(&epath).await?;
+            let zip_name = format!("csound-plugins_{}.zip", release_tag);
+            let zip_archive_path = temp_dir.join(zip_name);
+            let target_dir = plugins_dir_path.clone();
+
+            tokio::task::spawn_blocking(move || {
+                if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
+                utils::unzip_file(&zip_archive_path, &target_dir)
+            }).await??;
+
+            let mut entries = tokio::fs::read_dir(&plugins_dir_path).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let epath = entry.path();
+                if epath.is_dir() {
+                    if let Some(fname) = epath.file_name().and_then(|n| n.to_str()) {
+                        if fname.starts_with("csound-plugins-") {
+                            utils::copy_dir_recursively(&epath, &plugins_dir_path).await?;
+                            tokio::fs::remove_dir_all(&epath).await?;
+                        }
                     }
                 }
             }
         }
+    }
+
+    if is_v_error  {
+        plugins_dir_path = utils::check_valid_resource_dir(&temp_dir, "csound-plugins_")?;
     }
 
     let docs_path = plugins_dir_path.join("docs");

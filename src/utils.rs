@@ -1,5 +1,5 @@
 use std::time::Duration;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::io;
 use tower_lsp::lsp_types::SemanticTokenType;
 use serde::Deserialize;
@@ -138,4 +138,31 @@ pub async fn copy_dir_recursively(src: &Path, dest: &Path) -> std::io::Result<()
     }
 
    Ok(())
+}
+
+pub fn check_valid_resource_dir(dir: &Path, label: &str) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(ent) => ent,
+        Err(e) => return Err(format!("{}: no valid resource dir founded {}", label, e).into())
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(ent) => ent,
+            Err(_) => continue
+        };
+
+        let epath = entry.path();
+        let is_valid_dir = epath.is_dir() && epath
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|name| name.to_string().contains(label))
+            .unwrap_or(false);
+
+        if is_valid_dir {
+            return Ok(epath.clone());
+        }
+    }
+
+    Err(format!("{}: no valid resource dir founded", label).into())
 }

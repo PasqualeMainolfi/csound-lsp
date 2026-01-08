@@ -60,38 +60,40 @@ impl LanguageServer for Backend {
         let mut global_temp = std::env::temp_dir();
         global_temp.push(GLOBAL_TEMP_DIR);
 
-        let mut plugin_opcodes = self.plugins_opcodes.write().await;
-        match resolve_pulgins::find_installed_plugins().await {
-            Ok(plugs) => {
-                let p_installed = plugs.iter().cloned().collect::<Vec<String>>().join(", ");
-                self.client.log_message(MessageType::INFO, format!("Installed plugins: {}", p_installed)).await;
-                if let Err(e) = resolve_pulgins::load_plugins_resources(&mut global_temp, &plugs, &mut plugin_opcodes).await {
-                    self.client.log_message(MessageType::WARNING, format!("Impossible to load plugins: {}", e)).await
-                };
-            },
-            Err(e) => {
-                self.client.log_message(MessageType::INFO, format!("Installed plugins: {}", e)).await
-            }
-        };
-
-        let keys = &plugin_opcodes.keys().cloned().collect::<Vec<String>>().join(", ");
-        self.client.log_message(MessageType::INFO, format!("Loaded plugins: {}", keys)).await;
-
         let mut op = self.opcodes.write().await;
         let mut mp = self.manual_temp_path.write().await;
         if let Err(e) = assets::load_manual_resources(&mut global_temp, &mut op, &mut mp).await {
-            self.client.log_message(MessageType::WARNING, format!("Csound manual unavailable: {}", e)).await;
+            self.client.log_message(MessageType::WARNING, format!("[WARNING] Csound manual unavailable: {}", e)).await;
         }
 
         let mut cs_references = self.json_reference_completion_list.write().await;
         if let Err(e) = assets::read_csound_json_data(&mut cs_references, &mp).await {
-            self.client.log_message(MessageType::WARNING, format!("Csound opcodes references unavailable: {}", e)).await;
+            self.client.log_message(MessageType::WARNING, format!("[WARNING] Csound opcodes references unavailable: {}", e)).await;
         }
 
-        // add plugins in cs_references for completion
-        if let Err(e) = resolve_pulgins::add_plugins_to_cs_references(&plugin_opcodes, &mut cs_references).await {
-            self.client.log_message(MessageType::WARNING, format!("Plugins opcodes: {}", e)).await;
-        }
+        match resolve_pulgins::find_installed_plugins().await {
+            Ok(plugs) => {
+                let p_installed = plugs.iter().cloned().collect::<Vec<String>>().join(", ");
+                self.client.log_message(MessageType::INFO, format!("[INFO] Installed plugins: {}", p_installed)).await;
+                if !plugs.is_empty() {
+                    let mut plugin_opcodes = self.plugins_opcodes.write().await;
+                    if let Err(e) = resolve_pulgins::load_plugins_resources(&mut global_temp, &plugs, &mut plugin_opcodes).await {
+                        self.client.log_message(MessageType::WARNING, format!("[WARNING] Impossible to load plugins: {}", e)).await
+                    } else {
+                        let keys = &plugin_opcodes.keys().cloned().collect::<Vec<String>>().join(", ");
+                        self.client.log_message(MessageType::INFO, format!("[INFO] Loaded plugins: {}", keys)).await;
+
+                        // add plugins in cs_references for completion
+                        if let Err(e) = resolve_pulgins::add_plugins_to_cs_references(&plugin_opcodes, &mut cs_references).await {
+                            self.client.log_message(MessageType::WARNING, format!("[WARNING] Plugins opcodes: {}", e)).await;
+                        }
+                    };
+                }
+            },
+            Err(e) => {
+                self.client.log_message(MessageType::INFO, format!("[WARNING] Installed plugins: {}", e)).await
+            }
+        };
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -145,7 +147,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "Csound LSP initialized!")
+            .log_message(MessageType::INFO, "[INFO] Csound LSP initialized!")
             .await;
     }
 
@@ -203,12 +205,12 @@ impl LanguageServer for Backend {
                 // add external udo to cs_references
                 let mut jr = self.json_reference_completion_list.write().await;
                 if let Err(e) = resolve_udos::add_included_udos_to_cs_references(&doc.cached_included_udo_files, &mut jr).await {
-                    self.client.log_message(MessageType::WARNING, format!("Included User-Defined opcodes: {}", e)).await;
+                    self.client.log_message(MessageType::WARNING, format!("[WARNING] Included User-Defined opcodes: {}", e)).await;
                 }
 
                 // add local udo to cs_references
                 if let Err(e) = parser::add_local_udos_to_cs_references(&doc.user_definitions.user_defined_opcodes, &mut jr).await {
-                    self.client.log_message(MessageType::WARNING, format!("Included User-Defined opcodes: {}", e)).await;
+                    self.client.log_message(MessageType::WARNING, format!("[WARNING] Included User-Defined opcodes: {}", e)).await;
                 }
 
                 parser::get_semantic_tokens(&doc.query, &doc.tree, &text, None);
@@ -229,7 +231,7 @@ impl LanguageServer for Backend {
                     if pflag {
                         if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
                             if let Err(e) = entry.iterate_included_udo_file(&mut doc.csound_parser) {
-                                self.client.log_message(MessageType::WARNING, e).await
+                                self.client.log_message(MessageType::WARNING, format!("[WARNING]: {}", e)).await
                             }
                         }
                     }

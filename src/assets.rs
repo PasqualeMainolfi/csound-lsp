@@ -75,29 +75,38 @@ pub async fn load_manual_resources(
         Err(_) => "v-error".to_string() // verify prec version
     };
 
-    let dir_name = format!("csound_manual-html_{}", &release_tag);
-    let manual_dir_path = temp_dir.join(&dir_name);
+    let mut is_v_error = true;
+    let mut manual_dir_path = temp_dir.clone();
 
-    if !manual_dir_path.exists() && release_tag != "v-error" {
-        if temp_dir.exists() {
-            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    if release_tag != "v-error" {
+        is_v_error = false;
+        let dir_name = format!("csound_manual-html_{}", &release_tag);
+        manual_dir_path = manual_dir_path.join(&dir_name);
+
+        if !manual_dir_path.exists() {
+            if temp_dir.exists() {
+                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            }
+
+            let _ = tokio::fs::create_dir_all(&temp_dir).await;
+
+            let download_url = format!("{}/{}/{}", GITHUB_DOWNLOAD_BASE_MANUAL, release_tag, ASSET_NAME);
+            let local_file = temp_dir.join(format!("csound_manual-html_{}.zip", release_tag));
+            utils::download_from_github(&download_url, &temp_dir, &local_file).await?;
+
+            let zip_name = format!("csound_manual-html_{}.zip", release_tag);
+            let zip_archive_path = temp_dir.join(zip_name);
+            let target_dir = manual_dir_path.clone();
+
+            tokio::task::spawn_blocking(move || {
+                if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
+                utils::unzip_file(&zip_archive_path, &target_dir)
+            }).await??;
         }
+    }
 
-        let _ = tokio::fs::create_dir_all(&temp_dir).await;
-
-        let download_url = format!("{}/{}/{}", GITHUB_DOWNLOAD_BASE_MANUAL, release_tag, ASSET_NAME);
-        let local_file = temp_dir.join(format!("csound_manual-html_{}.zip", release_tag));
-        utils::download_from_github(&download_url, &temp_dir, &local_file).await?;
-
-        let zip_name = format!("csound_manual-html_{}.zip", release_tag);
-        let zip_archive_path = temp_dir.join(zip_name);
-        let target_dir = manual_dir_path.clone();
-
-        tokio::task::spawn_blocking(move || {
-            if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
-            utils::unzip_file(&zip_archive_path, &target_dir)
-        }).await??;
-
+    if is_v_error {
+        manual_dir_path = utils::check_valid_resource_dir(&temp_dir, "csound_manual-html_")?;
     }
 
     let op_path = manual_dir_path.join(&OPCODES_MD_DIR);
