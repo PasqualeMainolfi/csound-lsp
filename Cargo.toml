@@ -16,6 +16,7 @@ tree-sitter-html = "0.23.2"
 regex = "1.12.2"
 zip = "7.0.0"
 reqwest = { version = "0.13.1", features = ["json"] }
+ropey = "1.6.1"
 
 
 [dependencies.tree-sitter-csound]
