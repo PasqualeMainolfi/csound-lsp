@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use crate::utils::{ SEMANTIC_TOKENS, OMACROS, OPEN_BLOCKS, CLOSE_BLOCKS };
+use crate::utils::{ CLOSE_BLOCKS, CLOSER, OMACROS, OPEN_BLOCKS, OPENER, SEMANTIC_TOKENS };
 use crate::resolve_udos::UdoFile;
 use crate::assets;
 use regex::{ Regex, Captures };
@@ -20,6 +20,7 @@ use tower_lsp::lsp_types::{
     Url
 };
 
+use std::io::Cursor;
 use std::{
     fmt::{ self, Display, Formatter },
     path::{ Path, PathBuf },
@@ -49,44 +50,49 @@ pub fn get_token_lengend() -> SemanticTokensLegend {
     }
 }
 
-pub struct ExternalQuery {
-    pub parser: Parser,
-    pub query: Query
-}
-
 pub struct ParsedTree {
     pub tree: Tree,
-    pub query: Query,
-    pub query_injection: Query,
-    pub query_py: Query,
-    pub query_html: Query,
+    pub tree_type: TreeType,
     pub csound_parser: Parser,
     pub py_parser: Parser,
-    pub html_parser: Parser
+    pub html_parser: Parser,
 }
 
-pub fn parse_doc(text: &str) -> ParsedTree {
+pub struct Queries {
+    pub csound_highlights: Query,
+    pub csound_injection: Query,
+    pub py_highlights: Query,
+    pub html_highlights: Query
+}
+
+pub fn load_queries() -> Queries {
+    Queries {
+        csound_highlights: Query::new(&LANGUAGE.into(), HIGHLIGHTS_QUERY).unwrap(),
+        csound_injection: Query::new(&LANGUAGE.into(), INJECTIONS_QUERY).unwrap(),
+        py_highlights: Query::new(&tree_sitter_python::LANGUAGE.into(), tree_sitter_python::HIGHLIGHTS_QUERY).unwrap(),
+        html_highlights: Query::new(&tree_sitter_html::LANGUAGE.into(), tree_sitter_html::HIGHLIGHTS_QUERY).unwrap(),
+    }
+}
+
+pub fn parse_doc(text: &str, old_tree: Option<&Tree>) -> ParsedTree {
     let mut p = Parser::new();
     let language = LANGUAGE.into();
     p.set_language(&language).unwrap();
-    let query = Query::new(&LANGUAGE.into(), HIGHLIGHTS_QUERY).unwrap();
-    let query_injection = Query::new(&LANGUAGE.into(), INJECTIONS_QUERY).unwrap();
+
+    let tree = p.parse(text, old_tree).unwrap();
+    let tree_type = get_doc_type(tree.root_node());
 
     let mut py = Parser::new();
     let py_language = tree_sitter_python::LANGUAGE.into();
     py.set_language(&py_language).unwrap();
-    let query_py = Query::new(&tree_sitter_python::LANGUAGE.into(), tree_sitter_python::HIGHLIGHTS_QUERY).unwrap();
 
     let mut html = Parser::new();
     let html_language = tree_sitter_html::LANGUAGE.into();
     html.set_language(&html_language).unwrap();
-    let query_html = Query::new(&tree_sitter_html::LANGUAGE.into(), tree_sitter_html::HIGHLIGHTS_QUERY).unwrap();
+
     ParsedTree {
-        tree: p.parse(text, None).unwrap(),
-        query,
-        query_injection,
-        query_py,
-        query_html,
+        tree,
+        tree_type,
         csound_parser: p,
         py_parser: py,
         html_parser: html
@@ -109,7 +115,10 @@ pub enum GErrors {
     Syntax,
     ExplicitType,
     ScoreStatement,
-    MissingPfield
+    MissingPfield,
+    ControlLoopSyntaxError,
+    InstrBlockSyntaxError,
+    UdoBlockSyntaxError
 }
 
 #[derive(Debug)]
@@ -155,7 +164,8 @@ pub enum Scope {
     Instr(String),
     Udo(String),
     Score,
-    Global
+    Global,
+    Unknown
 }
 
 #[derive(Debug, PartialEq)]
@@ -240,7 +250,7 @@ impl UserDefinitions {
     }
 
     fn update_var_use<'a>(node: Node<'a>, map: &mut HashMap<String, UserDefinedVariable>, k: &String, acc: &AccessVariableType) -> bool {
-        let node_range = get_node_range(&node);
+        let node_range = get_node_range(&node, None);
         if let Some(var) = map.get_mut(k) {
             var.var_calls += 1;
             let p = node.parent().unwrap();
@@ -269,6 +279,7 @@ impl UserDefinitions {
 
     pub fn add_udv<'a>(&mut self, node: Node<'a>, key: &String, text: &String) {
         let physical_scope = find_scope(node, text);
+
         let access_type = get_access_type(node, text);
 
         let parent = node.parent();
@@ -320,7 +331,7 @@ impl UserDefinitions {
                 udv.is_undefined = !is_write;
                 udv.is_unused = is_write;
 
-                if !is_write { udv.references.push(get_node_range(&node)); }
+                if !is_write { udv.references.push(get_node_range(&node, None)); }
 
                 if preferred_scope == Scope::Global {
                     self.global_defined_vars.insert(key.clone(), udv);
@@ -689,36 +700,92 @@ pub fn iterate_tree<'a>(
                             .or_insert(uf);
                     }
                 }
-            }
-            // check ERROR node
+            },
+            "control_statement" => {
+                let mut c = node.walk();
+                let control_kind = node
+                    .children(&mut c)
+                    .find_map(|n| {
+                        let close = match n.kind() {
+                            "if_statement" =>  "endif_block",
+                            "while_loop" | "for_loop" | "until_loop" => "kw_od",
+                            "switch_statement" => "kw_switch_end",
+                            _ => return None
+                        };
+                        Some((n, close))
+                    });
+
+                if let Some((cnode, expected)) = control_kind {
+                    if !has_specific_node(cnode, expected) {
+                        nodes_to_diagnostics.generic_errors.push(GenericError {
+                                node: node,
+                                error_type: GErrors::ControlLoopSyntaxError
+                            }
+                        );
+                    }
+                }
+            },
+            "instrument_definition" | "udo_definition" => {
+                let first_child = node.child(0);
+                if let Some(n) = first_child {
+                    match n.kind() {
+                        "kw_instr" => {
+                            if !has_specific_node(node, "kw_endin") {
+                                nodes_to_diagnostics.generic_errors.push(GenericError {
+                                        node: node,
+                                        error_type: GErrors::InstrBlockSyntaxError
+                                    }
+                                );
+                            }
+                        },
+                        "udo_definition_legacy" | "udo_definition_modern" => {
+                            if !has_specific_node(node, "kw_endop") {
+                                nodes_to_diagnostics.generic_errors.push(GenericError {
+                                        node: node,
+                                        error_type: GErrors::UdoBlockSyntaxError
+                                    }
+                                );
+                            }
+                        },
+                        _ => { }
+                    }
+                }
+            },            // check ERROR node
             "ERROR" => {
                 if let Some(node_name) = get_node_name(node, &text) {
-                    let scope = find_scope(node, &text);
                     let trim_name = node_name.trim();
-                    let current_parent_kind = node.parent()
-                        .map(|p| p.kind())
-                        .unwrap_or("");
-
                     let condition = {
-                        !trim_name.contains(")") &&
-                        !trim_name.contains(",") &&
-                        !trim_name.contains("]") &&
-                        !trim_name.contains("<")
+                        (!trim_name.contains("<CsInstruments>") && !trim_name.contains("</CsInstruments>")) ||
+                        (!trim_name.contains("<CsScore>") && !trim_name.contains("</CsScore>")) ||
+                        (!trim_name.contains("csd_file") && !trim_name.contains("cs_legacy_file"))
                     };
+                    if condition {
+                        let scope = find_scope(node, &text);
+                        let current_parent_kind = node.parent()
+                            .map(|p| p.kind())
+                            .unwrap_or("");
 
-                    if scope != Scope::Score && current_parent_kind != "modern_udo_outputs" && condition {
-                        if trim_name.len() == 1 || trim_name.contains(":") {
-                            nodes_to_diagnostics.generic_errors.push(GenericError {
-                                    node: node,
-                                    error_type: GErrors::ExplicitType
-                                }
-                            );
-                        } else {
-                            nodes_to_diagnostics.generic_errors.push(GenericError {
-                                    node: node,
-                                    error_type: GErrors::Syntax
-                                }
-                            );
+                        let condition = {
+                            !trim_name.contains(")") &&
+                            !trim_name.contains(",") &&
+                            !trim_name.contains("]") &&
+                            !trim_name.contains("<")
+                        };
+
+                        if scope != Scope::Score && current_parent_kind != "modern_udo_outputs" && condition {
+                            if trim_name.len() == 1 || trim_name.contains(":") {
+                                nodes_to_diagnostics.generic_errors.push(GenericError {
+                                        node: node,
+                                        error_type: GErrors::ExplicitType
+                                    }
+                                );
+                            } else {
+                                nodes_to_diagnostics.generic_errors.push(GenericError {
+                                        node: node,
+                                        error_type: GErrors::Syntax
+                                    }
+                                );
+                            }
                         }
                     }
                 }
@@ -748,9 +815,20 @@ pub fn iterate_tree<'a>(
     nodes_to_diagnostics
 }
 
-pub fn get_node_range(node: &Node) -> Range {
-    let start = node.start_position();
-    let end = node.end_position();
+pub fn get_node_range(node: &Node, expand_line: Option<&String>) -> Range {
+    let mut start = node.start_position();
+    let mut end = node.end_position();
+
+    if let Some(text) = expand_line {
+        end.row = start.row;
+        end.column = text
+            .lines()
+            .nth(start.row)
+            .map(|l| l.len())
+            .unwrap_or(start.column);
+
+        start.column = 0;
+    }
 
     Range {
         start: Position {
@@ -798,6 +876,7 @@ pub fn find_node_at_cursor<'a>(tree: &'a Tree, pos: &Position, text: &str) -> Op
 // find local scope
 pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
     let mut current_node = node;
+    if current_node.kind() == "ERROR" { return Scope::Unknown }
     loop {
         let ckind = current_node.kind();
         if let Some(node_child) = current_node.child_by_field_name("name") {
@@ -814,17 +893,22 @@ pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
             return Scope::Score
         }
 
+        if ckind == "instrument_block" || ckind == "cs_legacy_file" {
+            return Scope::Global
+        }
+
         if let Some(p) = current_node.parent() {
             current_node = p;
         } else {
-            return Scope::Global;
+            break;
         }
     };
+    Scope::Global
 }
 
 fn get_access_type(node: Node, text: &String) -> AccessVariableType {
     let mut current_node = node;
-    for i in 0..6 {
+    for i in 0..12 {
         let parent = match current_node.parent() {
             Some(p) => p,
             None => return AccessVariableType::Read
@@ -982,8 +1066,10 @@ pub fn get_injections(
     text: &String,
     cs_parser: &mut Parser,
     cs_query: &Query,
-    py_external: &mut ExternalQuery,
-    html_external: &mut ExternalQuery
+    py_parser: &mut Parser,
+    py_query: &Query,
+    html_parser: &mut Parser,
+    html_query: &Query
 ) -> Vec<(u32, u32, u32, u32, u32)>
 {
     let mut cursor = QueryCursor::new();
@@ -1015,14 +1101,14 @@ pub fn get_injections(
 
             match lang {
                 "python" => {
-                    if let Some(py_tree) = py_external.parser.parse(&block, None) {
-                        let py_tokens = get_semantic_tokens(&py_external.query, &py_tree, &block, Some(start_position));
+                    if let Some(py_tree) = py_parser.parse(&block, None) {
+                        let py_tokens = get_semantic_tokens(&py_query, &py_tree, &block, Some(start_position));
                         stokens.extend(py_tokens);
                     }
                 },
                 "html" => {
-                    if let Some(html_tree) = html_external.parser.parse(&block, None) {
-                        let html_tokens = get_semantic_tokens(&html_external.query, &html_tree, &block, Some(start_position));
+                    if let Some(html_tree) = html_parser.parse(&block, None) {
+                        let html_tokens = get_semantic_tokens(&html_query, &html_tree, &block, Some(start_position));
                         stokens.extend(html_tokens);
                     }
                 },
@@ -1040,6 +1126,15 @@ pub fn get_injections(
     stokens
 }
 
+fn find_first_node_down_in_list<'a>(node: &Node<'a>, names: &[&'static str]) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .find(|c| {
+            let ck = c.kind();
+            names.contains(&ck)
+        })
+}
+
 pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
     let mut indent: usize = 0;
     let root = tree.root_node();
@@ -1048,31 +1143,114 @@ pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
     let epoint = Point { row: line, column: 9999 };
 
     if let Some(node) = root.descendant_for_point_range(spoint, epoint) {
-        let nkind = node.kind();
         let mut current = Some(node);
+        let mut  depth = 0;
         while let Some(n) = current {
-            if OPEN_BLOCKS.contains(&n.kind()) { indent += 1; }
-
-            if (n.id() == node.id() || n.id() == node.parent().unwrap().id()) {
-                if CLOSE_BLOCKS.contains(&nkind) { if indent > 0 { indent -= 1; } }
+            if depth > 128 {
+                break;
             }
 
-            current = n.parent()
+            let nkind = n.kind();
+            let start_row = n.start_position().row;
+
+            if OPEN_BLOCKS.iter().any(|k| *k == n.kind()) {
+                if start_row < line { indent += 1; }
+            }
+
+            if nkind == "ERROR" {
+                if let Some(_) = find_first_node_down_in_list(&n, &OPENER) {
+                    indent += 1;
+                }
+            }
+
+            if CLOSE_BLOCKS.iter().any(|k| *k == n.kind()) {
+                if indent > 0 { indent -= 1; }
+            }
+
+            current = n.parent();
+            depth += 1;
+
         }
     }
     indent
 }
 
-pub async fn add_local_udos_to_cs_references(udos: &HashMap<String, String>, cs_references: &mut assets::CsoundJsonData) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let opdata = cs_references.opcodes_data.as_mut().ok_or("Internal opcode cache corrupted!")?;
-    for (udo, prefix) in udos.iter() {
-        if let None = opdata.get(udo) {
-            opdata.insert(udo.clone(), assets::OpcodesData {
-                prefix: prefix.strip_prefix("opcode ").unwrap().to_string(),
-                body: assets::BodyOpCompletion::SingleLine(udo.clone()),
-                description: format!("user-defined opcode" )
-            });
+pub fn add_local_udos_to_cs_references(udos: &HashMap<String, String>, cs_references: &mut assets::CsoundJsonData) -> bool {
+    let opdata = cs_references.opcodes_data.as_mut();
+    if let Some(opdata) = opdata {
+        for (udo, prefix) in udos.iter() {
+            if let None = opdata.get(udo) {
+                opdata.insert(udo.clone(), assets::OpcodesData {
+                    prefix: prefix.strip_prefix("opcode ").unwrap().to_string(),
+                    body: assets::BodyOpCompletion::SingleLine(udo.clone()),
+                    description: format!("user-defined opcode" )
+                });
+            }
         }
+        return true;
     }
-    Ok(())
+    return false;
+}
+
+fn has_specific_node(node: Node, expected_kind: &str) -> bool {
+    let mut cursor = node.walk();
+    let mut skip_root = false;
+    loop {
+        let n = cursor.node();
+        if skip_root {
+            if n.kind() == "ERROR" { return false; }
+            if n.kind() == expected_kind { return true; }
+        }
+
+        if cursor.goto_first_child() {
+            skip_root = true;
+            continue;
+        }
+
+        if cursor.goto_next_sibling() { continue; }
+
+        let mut block = false;
+        while cursor.goto_parent() {
+            if cursor.goto_next_sibling() {
+                block = true;
+                break;
+            }
+        }
+        if !block { break; }
+    }
+    false
+}
+
+#[derive(PartialEq)]
+pub enum TreeType {
+    Csd,
+    Sco,
+    Orc,
+    Unknown
+}
+
+pub fn get_doc_type(root_node: Node) -> TreeType {
+    let mut cursor = root_node.walk();
+    loop {
+        let n = cursor.node();
+        match n.kind() {
+            "csd_file" =>  return TreeType::Csd,
+            "cs_orchestra_udo" => return TreeType::Orc,
+            "cs_score" => return TreeType::Sco,
+            _ => { }
+        }
+
+        if cursor.goto_first_child() { continue; }
+        if cursor.goto_next_sibling() { continue; }
+
+        let mut block = false;
+        while cursor.goto_parent() {
+            if cursor.goto_next_sibling() {
+                block = true;
+                break;
+            }
+        }
+        if !block { break; }
+    }
+    TreeType::Unknown
 }

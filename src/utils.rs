@@ -38,12 +38,14 @@ pub const OMACROS: [&'static str; 13] = [
     "M_SQRT1_2"
 ];
 
-pub const OPEN_BLOCKS: [&'static str; 14] = [
+pub const OPEN_BLOCKS: [&'static str; 16] = [
     "instrument_definition",
     "udo_definition_legacy",
     "udo_definition_modern",
     "internal_code_block",
     "if_statement",
+    "goto_statement",
+    "then_block",
     "else_block",
     "elseif_block",
     "switch_statement",
@@ -74,6 +76,31 @@ pub const CLOSE_BLOCKS: [&'static str; 16] = [
     "}"
 ];
 
+pub const OPENER: [&'static str; 14] = [
+    "kw_if",
+    "kw_tif",
+    "kw_while",
+    "kw_until",
+    "kw_for",
+    "kw_then",
+    "kw_ithen",
+    "kw_kthen",
+    "kw_instr",
+    "kw_opcode",
+    "kw_do",
+    "kw_switch",
+    "open_raw_string",
+    "{"
+];
+
+pub const CLOSER: [&'static str; 6] = [
+    "kw_fi",
+    "kw_od",
+    "kw_endin",
+    "kw_endop",
+    "kw_endsw",
+    "}"
+];
 
 #[derive(Deserialize)]
 pub struct ReleaseTag {

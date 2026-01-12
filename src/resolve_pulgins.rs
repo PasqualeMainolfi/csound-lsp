@@ -220,10 +220,8 @@ pub async fn load_plugins_resources(
             let zip_archive_path = temp_dir.join(zip_name);
             let target_dir = plugins_dir_path.clone();
 
-            tokio::task::spawn_blocking(move || {
-                if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
-                utils::unzip_file(&zip_archive_path, &target_dir)
-            }).await??;
+            if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
+            utils::unzip_file(&zip_archive_path, &target_dir)?;
 
             let mut entries = tokio::fs::read_dir(&plugins_dir_path).await?;
             while let Some(entry) = entries.next_entry().await? {

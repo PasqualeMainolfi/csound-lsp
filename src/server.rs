@@ -5,11 +5,12 @@ use crate::{
     resolve_pulgins
 };
 
+use ropey::Rope;
 use serde_json::Value;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{ Client, LanguageServer };
-use tree_sitter::{ Tree, Query, Parser };
+use tree_sitter::{ InputEdit, Parser, Point, Tree };
 use tokio::sync::RwLock;
 use std::{
     collections::{ HashMap, HashSet },
@@ -20,16 +21,15 @@ use std::{
 const GLOBAL_TEMP_DIR: &str = "csound-lsp_temp_folder";
 
 pub struct CurrentDocument {
-    pub text: String,
+    pub text: Rope,
+    pub doc_type: parser::TreeType,
     pub tree: Tree,
-    pub query: Query,
-    pub query_injection: Query,
     pub user_definitions: parser::UserDefinitions,
     pub cached_typed_vars: HashMap<String, String>,
     pub cached_included_udo_files: HashMap<String, resolve_udos::UdoFile>,
     pub csound_parser: Parser,
-    pub py_query: parser::ExternalQuery,
-    pub html_query: parser::ExternalQuery
+    pub py_parser: Parser,
+    pub html_parser: Parser
 }
 
 pub struct Backend {
@@ -38,18 +38,21 @@ pub struct Backend {
     opcodes: Arc<RwLock<HashMap<String, String>>>,
     json_reference_completion_list: Arc<RwLock<assets::CsoundJsonData>>,
     manual_temp_path: Arc<RwLock<PathBuf>>,
-    plugins_opcodes: Arc<RwLock<HashMap<String, resolve_pulgins::CsoundPlugin>>>
+    plugins_opcodes: Arc<RwLock<HashMap<String, resolve_pulgins::CsoundPlugin>>>,
+    queries: Arc<RwLock<parser::Queries>>
 }
 
 impl Backend {
     pub fn new(client: Client) -> Self {
+        let queries = parser::load_queries();
         Self {
             client,
             document_state: Arc::new(RwLock::new(HashMap::new())),
             opcodes: Arc::new(RwLock::new(HashMap::new())),
             json_reference_completion_list: Arc::new(RwLock::new(assets::CsoundJsonData::default())),
             manual_temp_path: Arc::new(RwLock::new(PathBuf::new())),
-            plugins_opcodes: Arc::new(RwLock::new(HashMap::new()))
+            plugins_opcodes: Arc::new(RwLock::new(HashMap::new())),
+            queries: Arc::new(RwLock::new(queries))
         }
     }
 }
@@ -57,44 +60,6 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
-        let mut global_temp = std::env::temp_dir();
-        global_temp.push(GLOBAL_TEMP_DIR);
-
-        let mut op = self.opcodes.write().await;
-        let mut mp = self.manual_temp_path.write().await;
-        if let Err(e) = assets::load_manual_resources(&mut global_temp, &mut op, &mut mp).await {
-            self.client.log_message(MessageType::WARNING, format!("[WARNING] Csound manual unavailable: {}", e)).await;
-        }
-
-        let mut cs_references = self.json_reference_completion_list.write().await;
-        if let Err(e) = assets::read_csound_json_data(&mut cs_references, &mp).await {
-            self.client.log_message(MessageType::WARNING, format!("[WARNING] Csound opcodes references unavailable: {}", e)).await;
-        }
-
-        match resolve_pulgins::find_installed_plugins().await {
-            Ok(plugs) => {
-                let p_installed = plugs.iter().cloned().collect::<Vec<String>>().join(", ");
-                self.client.log_message(MessageType::INFO, format!("[INFO] Installed plugins: {}", p_installed)).await;
-                if !plugs.is_empty() {
-                    let mut plugin_opcodes = self.plugins_opcodes.write().await;
-                    if let Err(e) = resolve_pulgins::load_plugins_resources(&mut global_temp, &plugs, &mut plugin_opcodes).await {
-                        self.client.log_message(MessageType::WARNING, format!("[WARNING] Impossible to load plugins: {}", e)).await
-                    } else {
-                        let keys = &plugin_opcodes.keys().cloned().collect::<Vec<String>>().join(", ");
-                        self.client.log_message(MessageType::INFO, format!("[INFO] Loaded plugins: {}", keys)).await;
-
-                        // add plugins in cs_references for completion
-                        if let Err(e) = resolve_pulgins::add_plugins_to_cs_references(&plugin_opcodes, &mut cs_references).await {
-                            self.client.log_message(MessageType::WARNING, format!("[WARNING] Plugins opcodes: {}", e)).await;
-                        }
-                    };
-                }
-            },
-            Err(e) => {
-                self.client.log_message(MessageType::INFO, format!("[WARNING] Installed plugins: {}", e)).await
-            }
-        };
-
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
@@ -149,6 +114,60 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "[INFO] Csound LSP initialized!")
             .await;
+
+        // locks
+        let mut opcodes = self.opcodes.write().await;
+        let mut manual_path = self.manual_temp_path.write().await;
+        let mut cs_references = self.json_reference_completion_list.write().await;
+        let mut plugins_opcodes = self.plugins_opcodes.write().await;
+
+        let mut global_temp = std::env::temp_dir();
+        global_temp.push(GLOBAL_TEMP_DIR);
+
+        // Manual
+        if let Err(e) = assets::load_manual_resources(
+            &mut global_temp, &mut opcodes, &mut manual_path
+        ).await {
+            self.client.log_message(MessageType::WARNING, format!("[WARNING] Csound manual unavailable: {}", e)).await;
+        }
+
+        if let Err(e) = assets::read_csound_json_data(
+            &mut cs_references,  &manual_path
+        ).await {
+            self.client.log_message(MessageType::WARNING, format!("[WARNING] Csound opcodes references unavailable: {}", e)).await;
+        }
+
+        // Plugins
+        match resolve_pulgins::find_installed_plugins().await {
+            Ok(plugs) => {
+                let p_installed = plugs.iter().cloned().collect::<Vec<String>>().join(", ");
+                self.client.log_message(MessageType::INFO, format!("[INFO] Installed plugins: {}", p_installed)).await;
+                if !plugs.is_empty() {
+                    if let Err(e) = resolve_pulgins::load_plugins_resources(
+                        &mut global_temp, &plugs, &mut plugins_opcodes
+                    ).await {
+                        self.client.log_message(MessageType::WARNING, format!("[WARNING] Impossible to load plugins: {}", e)).await;
+                    } else {
+                        let keys = &plugins_opcodes
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<String>>().join(", ");
+
+                        self.client.log_message(MessageType::INFO, format!("[INFO] Loaded plugins: {}", keys)).await;
+
+                        // add plugins in cs_references for completion
+                        if let Err(e) = resolve_pulgins::add_plugins_to_cs_references(
+                            &plugins_opcodes, &mut cs_references
+                        ).await {
+                            self.client.log_message(MessageType::WARNING, format!("[WARNING] Plugins opcodes: {}", e)).await;
+                        }
+                    };
+                }
+            },
+            Err(e) => {
+                self.client.log_message(MessageType::INFO, format!("[WARNING] Installed plugins: {}", e)).await;
+            }
+        };
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -157,22 +176,21 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
-        let text = params.text_document.text;
-        let parsed_tree = parser::parse_doc(&text);
+        let text = Rope::from_str(&params.text_document.text);
+        let parsed_tree = parser::parse_doc(&text.to_string(), None);
         let mut d = self.document_state.write().await;
         d.insert(
             uri,
             CurrentDocument {
                 text,
+                doc_type: parsed_tree.tree_type,
                 tree: parsed_tree.tree,
-                query: parsed_tree.query,
-                query_injection: parsed_tree.query_injection,
                 user_definitions: parser::UserDefinitions::new(),
                 cached_typed_vars: HashMap::new(),
                 cached_included_udo_files: HashMap::new(),
                 csound_parser: parsed_tree.csound_parser,
-                py_query: parser::ExternalQuery { parser: parsed_tree.py_parser, query: parsed_tree.query_py },
-                html_query: parser::ExternalQuery { parser: parsed_tree.html_parser, query: parsed_tree.query_html }
+                py_parser: parsed_tree.py_parser,
+                html_parser: parsed_tree.html_parser,
             }
         );
     }
@@ -185,144 +203,228 @@ impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
 
-        if let Some(current_change) = params.content_changes.into_iter().next() {
-            let mut diagnostics = Vec::new();
-            let mut cached_diag: HashSet<(u32, u32, String)> = HashSet::new();
-            let mut d = self.document_state.write().await;
-            let opcodes = self.opcodes.read().await;
+        let csound_queries = self.queries.read().await;
 
-            if let Some(doc) = d.get_mut(&uri) {
-                let text = current_change.text;
-                let parsed_tree = parser::parse_doc(&text);
-                doc.text = text.clone();
-                doc.tree = parsed_tree.tree;
-                doc.query = parsed_tree.query;
-                doc.query_injection = parsed_tree.query_injection;
-                let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text, &uri);
-                doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
-                doc.user_definitions = nodes_to_diagnostics.user_definitions;
+        let mut d = self.document_state.write().await;
+        let opcodes = self.opcodes.read().await;
+        let mut diagnostics = Vec::new();
+        let mut cached_diag: HashSet<(u32, u32, String)> = HashSet::new();
+        if let Some(doc) = d.get_mut(&uri) {
+            for change in params.content_changes {
+                if let Some(range) = change.range {
+                    let start_char = doc.text.line_to_char(range.start.line as usize) + range.start.character as usize;
+                    let start_byte = doc.text.char_to_byte(start_char);
 
-                // add external udo to cs_references
-                let mut jr = self.json_reference_completion_list.write().await;
-                if let Err(e) = resolve_udos::add_included_udos_to_cs_references(&doc.cached_included_udo_files, &mut jr).await {
-                    self.client.log_message(MessageType::WARNING, format!("[WARNING] Included User-Defined opcodes: {}", e)).await;
+                    let start_position = Point {
+                        row: range.start.line as usize,
+                        column: range.start.character as usize
+                    };
+
+                    let old_end_char = doc.text.line_to_char(range.end.line as usize) + range.end.character as usize;
+                    let old_end_byte = doc.text.char_to_byte(old_end_char);
+
+                    let old_end_position = Point {
+                        row: range.end.line as usize,
+                        column: range.end.character as usize
+                    };
+
+                    doc.text.remove(start_char..old_end_char);
+                    doc.text.insert(start_char, &change.text);
+
+                    let new_end_byte = start_byte + change.text.len();
+                    let new_end_char = doc.text.byte_to_char(new_end_byte);
+                    let new_end_line = doc.text.char_to_line(new_end_char);
+                    let new_end_column = new_end_char - doc.text.line_to_char(new_end_line);
+
+                    let new_end_position = Point {
+                        row: new_end_line,
+                        column: new_end_column
+                    };
+
+                    let input_edit = InputEdit {
+                        start_byte,
+                        old_end_byte,
+                        new_end_byte,
+                        start_position,
+                        old_end_position,
+                        new_end_position
+                    };
+
+                    doc.tree.edit(&input_edit);
+                    let parsed_tree = parser::parse_doc(&doc.text.to_string(), Some(&doc.tree));
+                    doc.tree = parsed_tree.tree;
+                    doc.csound_parser = parsed_tree.csound_parser;
+                    doc.py_parser = parsed_tree.py_parser;
+                    doc.html_parser = parsed_tree.html_parser;
+                } else {
+                    doc.text = Rope::from_str(&change.text);
+                    let parsed_tree = parser::parse_doc(&change.text, None);
+                    doc.tree = parsed_tree.tree;
+                    doc.csound_parser = parsed_tree.csound_parser;
+                    doc.py_parser = parsed_tree.py_parser;
+                    doc.html_parser = parsed_tree.html_parser;
                 }
+            }
 
-                // add local udo to cs_references
-                if let Err(e) = parser::add_local_udos_to_cs_references(&doc.user_definitions.user_defined_opcodes, &mut jr).await {
-                    self.client.log_message(MessageType::WARNING, format!("[WARNING] Included User-Defined opcodes: {}", e)).await;
-                }
+            let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text.to_string(), &uri);
+            doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
+            doc.user_definitions = nodes_to_diagnostics.user_definitions;
 
-                parser::get_semantic_tokens(&doc.query, &doc.tree, &text, None);
+            // add external udo to cs_references
+            let mut jr = self.json_reference_completion_list.write().await;
+            if !resolve_udos::add_included_udos_to_cs_references(&doc.cached_included_udo_files, &mut jr) {
+                self.client.log_message(MessageType::WARNING, "[WARNING] Included User-Defined opcodes: internal opcodes cache corrupted!").await;
+            }
 
-                for (ufile_path, ufile) in nodes_to_diagnostics.included_udo_files.iter() {
-                    let mut pflag = false;
-                    if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
-                        if entry.content_hash != ufile.content_hash {
-                            entry.content_hash = ufile.content_hash;
-                            entry.content = ufile.content.clone();
-                            pflag = true;
-                        }
-                    } else {
-                        doc.cached_included_udo_files.insert(ufile_path.clone(), ufile.clone());
+            // add local udo to cs_references
+            if !parser::add_local_udos_to_cs_references(&doc.user_definitions.user_defined_opcodes, &mut jr) {
+                self.client.log_message(MessageType::WARNING, "[WARNING] Included User-Defined opcodes: internal opcodes cache corrupted").await;
+            }
+
+            parser::get_semantic_tokens(&csound_queries.csound_highlights, &doc.tree, &doc.text.to_string(), None);
+
+            for (ufile_path, ufile) in nodes_to_diagnostics.included_udo_files.iter() {
+                let mut pflag = false;
+                if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
+                    if entry.content_hash != ufile.content_hash {
+                        entry.content_hash = ufile.content_hash;
+                        entry.content = ufile.content.clone();
                         pflag = true;
                     }
+                } else {
+                    doc.cached_included_udo_files.insert(ufile_path.clone(), ufile.clone());
+                    pflag = true;
+                }
 
-                    if pflag {
-                        if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
-                            if let Err(e) = entry.iterate_included_udo_file(&mut doc.csound_parser) {
-                                self.client.log_message(MessageType::WARNING, format!("[WARNING]: {}", e)).await
+                if pflag {
+                    if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
+                        if let Err(e) = entry.iterate_included_udo_file(&mut doc.csound_parser) {
+                            self.client.log_message(MessageType::WARNING, format!("[WARNING]: {}", e)).await
+                        }
+                    }
+                }
+            }
+
+            let ufile_to_remove: Vec<String> = {
+                let mut to_remove = Vec::new();
+                for (p, _) in &doc.cached_included_udo_files {
+                    if !nodes_to_diagnostics.included_udo_files.contains_key(p) {
+                        to_remove.push(p.clone());
+                    }
+                }
+                to_remove
+            };
+
+            for p in ufile_to_remove {
+                doc.cached_included_udo_files.remove(&p);
+            }
+
+            for var in &doc.user_definitions.unused_vars {
+                if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
+                    let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
+
+                    // #[cfg(debug_assertions)]
+                    {
+                        self.client.log_message(MessageType::INFO,
+                            format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
+                            finded_node.kind(),
+                            finded_node.parent().unwrap().kind(),
+                            var.var_name,
+                            var.var_calls,
+                            var.var_scope,
+                        )).await;
+                    }
+
+                    let diag = Diagnostic {
+                        range: parser::get_node_range(&finded_node, None),
+                        severity: Some(DiagnosticSeverity::HINT),
+                        source: Some("csound-lsp".into()),
+                        message: {
+                            match parent_finded_kind {
+                                "label_statement" => "Unused label".to_string(),
+                                "macro_name" => "Unused macro".to_string(),
+                                _ => "Unused variable".to_string(),
+                            }
+                        },
+                        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                        ..Default::default()
+                    };
+                    if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                        diagnostics.push(diag);
+                    }
+                }
+            }
+
+            for var in &doc.user_definitions.undefined_vars {
+                if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
+                    let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
+
+                    // #[cfg(debug_assertions)]
+                    {
+                        self.client.log_message(MessageType::INFO,
+                            format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
+                            finded_node.kind(),
+                            finded_node.parent().unwrap().kind(),
+                            var.var_name,
+                            var.var_calls,
+                            var.var_scope
+                        )).await;
+                    }
+
+                    for node_range in &var.references {
+                        let mut pflag = false;
+                        if parent_finded_kind == "macro_usage" {
+                            pflag = doc.cached_included_udo_files
+                                .values()
+                                .any(|v| v.macro_list.contains(&var.var_name));
+                        }
+
+                        if !pflag {
+                            let diag = Diagnostic {
+                                range: *node_range,
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                source: Some("csound-lsp".into()),
+                                message: {
+                                    match parent_finded_kind {
+                                        "label_statement" => "Undefined label".to_string(),
+                                        "macro_usage" => "Undefined macro".to_string(),
+                                        _ => "Undefined variable".to_string(),
+                                    }
+                                },
+                                ..Default::default()
+                            };
+                            if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                                diagnostics.push(diag);
                             }
                         }
                     }
                 }
+            }
 
-                let ufile_to_remove: Vec<String> = {
-                    let mut to_remove = Vec::new();
-                    for (p, _) in &doc.cached_included_udo_files {
-                        if !nodes_to_diagnostics.included_udo_files.contains_key(p) {
-                            to_remove.push(p.clone());
-                        }
-                    }
-                    to_remove
-                };
+            for node in nodes_to_diagnostics.opcodes {
+                if let Some(nt) = parser::get_node_name(node, &doc.text.to_string()) {
+                    let node_type = nt.split_once(":").map(|(prefix, _)| prefix.to_string()).unwrap_or(nt);
 
-                for p in ufile_to_remove {
-                    doc.cached_included_udo_files.remove(&p);
-                }
+                    let is_included_udo = doc.cached_included_udo_files
+                        .values()
+                        .any(|u| u.udo_list.contains(&node_type));
 
-                for var in &doc.user_definitions.unused_vars {
-                    if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
-                        let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
+                    let plugins = self.plugins_opcodes.read().await;
 
-                        #[cfg(debug_assertions)]
-                        {
-                            self.client.log_message(MessageType::INFO,
-                                format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
-                                finded_node.kind(),
-                                finded_node.parent().unwrap().kind(),
-                                var.var_name,
-                                var.var_calls,
-                                var.var_scope
-                            )).await;
-                        }
-
-                        let diag = Diagnostic {
-                            range: parser::get_node_range(&finded_node),
-                            severity: Some(DiagnosticSeverity::HINT),
-                            source: Some("csound-lsp".into()),
-                            message: {
-                                match parent_finded_kind {
-                                    "label_statement" => "Unused label".to_string(),
-                                    "macro_name" => "Unused macro".to_string(),
-                                    _ => "Unused variable".to_string(),
-                                }
-                            },
-                            tags: Some(vec![DiagnosticTag::UNNECESSARY]),
-                            ..Default::default()
-                        };
-                        if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
-                            diagnostics.push(diag);
-                        }
-                    }
-                }
-
-                for var in &doc.user_definitions.undefined_vars {
-                    if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
-                        let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
-
-                        #[cfg(debug_assertions)]
-                        {
-                            self.client.log_message(MessageType::INFO,
-                                format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
-                                finded_node.kind(),
-                                finded_node.parent().unwrap().kind(),
-                                var.var_name,
-                                var.var_calls,
-                                var.var_scope
-                            )).await;
-                        }
-
-                        for node_range in &var.references {
-                            let mut pflag = false;
-                            if parent_finded_kind == "macro_usage" {
-                                pflag = doc.cached_included_udo_files
-                                    .values()
-                                    .any(|v| v.macro_list.contains(&var.var_name));
-                            }
-
-                            if !pflag {
+                    if {
+                        !nodes_to_diagnostics.udo.contains(&node_type) &&
+                        !nodes_to_diagnostics.udt.contains(&node_type) &&
+                        !plugins.contains_key(&node_type)              &&
+                        !is_included_udo
+                    } {
+                        match opcodes.get(&node_type) {
+                            Some(_) => { },
+                            None => {
                                 let diag = Diagnostic {
-                                    range: *node_range,
+                                    range: parser::get_node_range(&node, None),
                                     severity: Some(DiagnosticSeverity::ERROR),
                                     source: Some("csound-lsp".into()),
-                                    message: {
-                                        match parent_finded_kind {
-                                            "label_statement" => "Undefined label".to_string(),
-                                            "macro_usage" => "Undefined macro".to_string(),
-                                            _ => "Undefined variable".to_string(),
-                                        }
-                                    },
+                                    message: format!("Unknown opcode: <{}>", node_type),
                                     ..Default::default()
                                 };
                                 if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
@@ -332,84 +434,21 @@ impl LanguageServer for Backend {
                         }
                     }
                 }
+            }
 
-                for node in nodes_to_diagnostics.opcodes {
-                    if let Some(nt) = parser::get_node_name(node, &doc.text) {
-                        let node_type = nt.split_once(":").map(|(prefix, _)| prefix.to_string()).unwrap_or(nt);
+            for node in nodes_to_diagnostics.types {
+                let type_identifier = parser::get_node_name(node, &doc.text.to_string()).unwrap();
 
-                        let is_included_udo = doc.cached_included_udo_files
-                            .values()
-                            .any(|u| u.udo_list.contains(&node_type));
+                let is_type_included = doc.cached_included_udo_files
+                    .values()
+                    .any(|t| t.type_list.contains(&type_identifier));
 
-                        let plugins = self.plugins_opcodes.read().await;
-
-                        if {
-                            !nodes_to_diagnostics.udo.contains(&node_type) &&
-                            !nodes_to_diagnostics.udt.contains(&node_type) &&
-                            !plugins.contains_key(&node_type)              &&
-                            !is_included_udo
-                        } {
-                            match opcodes.get(&node_type) {
-                                Some(_) => { },
-                                None => {
-                                    let diag = Diagnostic {
-                                        range: parser::get_node_range(&node),
-                                        severity: Some(DiagnosticSeverity::ERROR),
-                                        source: Some("csound-lsp".into()),
-                                        message: format!("Unknown opcode: <{}>", node_type),
-                                        ..Default::default()
-                                    };
-                                    if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
-                                        diagnostics.push(diag);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                for node in nodes_to_diagnostics.types {
-                    let type_identifier = parser::get_node_name(node, &doc.text).unwrap();
-
-                    let is_type_included = doc.cached_included_udo_files
-                        .values()
-                        .any(|t| t.type_list.contains(&type_identifier));
-
-                    if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) && !is_type_included {
-                        let diag = Diagnostic {
-                            range: parser::get_node_range(&node),
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            source: Some("csound-lsp".into()),
-                            message: format!("Unknown type identifier: <{}>", type_identifier),
-                            ..Default::default()
-                        };
-                        if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
-                            diagnostics.push(diag);
-                        }
-                    }
-                }
-
-                for node in nodes_to_diagnostics.generic_errors.iter() {
-                    let node_name = parser::get_node_name(node.node, &doc.text).unwrap();
-                    let message = match node.error_type {
-                        parser::GErrors::Syntax => {
-                            format!("Syntax error: <{}>", node_name)
-                        },
-                        parser::GErrors::ExplicitType => {
-                            format!("Unknown type identifier: <{}>", node_name)
-                        },
-                        parser::GErrors::ScoreStatement => {
-                            format!("Unknown score statement <{}>", node_name)
-                        },
-                        parser::GErrors::MissingPfield => {
-                            format!("Missing mandatory p-fields (p1, p2, p3)")
-                        }
-                    };
+                if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) && !is_type_included {
                     let diag = Diagnostic {
-                        range: parser::get_node_range(&node.node),
+                        range: parser::get_node_range(&node, None),
                         severity: Some(DiagnosticSeverity::ERROR),
                         source: Some("csound-lsp".into()),
-                        message: message,
+                        message: format!("Unknown type identifier: <{}>", type_identifier),
                         ..Default::default()
                     };
                     if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
@@ -417,10 +456,53 @@ impl LanguageServer for Backend {
                     }
                 }
             }
-            self.client.publish_diagnostics(uri, diagnostics, None).await;
-        }
 
+            for node in nodes_to_diagnostics.generic_errors.iter() {
+                let node_name = parser::get_node_name(node.node, &doc.text.to_string()).unwrap();
+                let mut expand_error = None;
+                let message = match node.error_type {
+                    parser::GErrors::Syntax => {
+                        format!("Syntax error: <{}>", node_name)
+                    },
+                    parser::GErrors::ExplicitType => {
+                        format!("Unknown type identifier: <{}>", node_name)
+                    },
+                    parser::GErrors::ScoreStatement => {
+                        format!("Unknown score statement <{}>", node_name)
+                    },
+                    parser::GErrors::MissingPfield => {
+                        format!("Missing mandatory p-fields (p1, p2, p3)")
+                    }
+                    parser::GErrors::ControlLoopSyntaxError => {
+                        expand_error = Some(doc.text.to_string());
+                        format!("Unclosed control block")
+                    },
+                    parser::GErrors::InstrBlockSyntaxError => {
+                        expand_error = Some(doc.text.to_string());
+                        format!("Unclosed instr block")
+                    },
+                    parser::GErrors::UdoBlockSyntaxError => {
+                        expand_error = Some(doc.text.to_string());
+                        format!("Unclosed udo block")
+                    }
+                };
+
+                let diag = Diagnostic {
+                    range: parser::get_node_range(&node.node, expand_error.as_ref()),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    source: Some("csound-lsp".into()),
+                    message: message,
+                    ..Default::default()
+                };
+
+                if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                    diagnostics.push(diag);
+                }
+            }
+        }
+        self.client.publish_diagnostics(uri, diagnostics, None).await;
     }
+
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri.clone();
@@ -430,18 +512,20 @@ impl LanguageServer for Backend {
         if let Some(doc) = dc.get(&uri) {
             if let Some(node) = parser::find_node_at_position(&doc.tree, &pos) {
                 let node_kind = node.kind();
-                let node_type = node.utf8_text(doc.text.as_bytes()).unwrap_or("???"); // opcode key
+                let node_type = doc.text.slice(node.byte_range()).to_string().trim().to_string(); // opcode key
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
-                #[cfg(debug_assertions)]
+                // #[cfg(debug_assertions)]
                 {
+                    let sib = node.prev_named_sibling().map(|p| p.kind()).unwrap_or("None");
                     self.client.log_message(MessageType::INFO,
-                        format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}",
+                        format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}, sib={}",
                         node_kind,
-                        parser::get_node_name(node, &doc.text).unwrap_or_default(),
+                        parser::get_node_name(node, &doc.text.to_string()).unwrap_or_default(),
                         node.parent().map(|p| p.kind()).unwrap_or("None"),
-                        parser::find_scope(node, &doc.text)
+                        parser::find_scope(node, &doc.text.to_string()),
+                        sib
                     )).await;
                 }
 
@@ -474,7 +558,7 @@ impl LanguageServer for Backend {
                             }
                         }
 
-                        if let Some(plug) = plugins.get(node_type) {
+                        if let Some(plug) = plugins.get(&node_type) {
                             let pdoc = format!("## Plugin Opcodes (from `{}`)\n{}", plug.libname, plug.documentation);
                             return Ok(Some(Hover {
                                 contents: HoverContents::Markup(MarkupContent {
@@ -486,7 +570,7 @@ impl LanguageServer for Backend {
                             )
                         }
 
-                        if let Some(reference) = opcodes.get(node_type) {
+                        if let Some(reference) = opcodes.get(&node_type) {
                             return Ok(Some(Hover {
                                 contents: HoverContents::Markup(MarkupContent {
                                         kind: MarkupKind::Markdown,
@@ -507,7 +591,7 @@ impl LanguageServer for Backend {
                             .unwrap_or(false);
 
                         if is_type {
-                            if let Some(child_type_name) = parser::get_node_name(node, &doc.text) {
+                            if let Some(child_type_name) = parser::get_node_name(node, &doc.text.to_string()) {
                                 if let Some(sd) = doc.user_definitions.user_defined_types.get(&child_type_name) {
                                     let md = format!("## User-Defined Type\n```csound\n{}\n```", sd.udt_format);
                                     return Ok(Some(Hover {
@@ -535,7 +619,7 @@ impl LanguageServer for Backend {
                                     }
                                 }
 
-                                let splitted_name = node_type.split_once(":").map(|(p, _)| p).unwrap_or(node_type);
+                                let splitted_name = node_type.split_once(":").map(|(p, _)| p).unwrap_or(&node_type);
                                 if let Some(reference) = opcodes.get(splitted_name) {
                                     return Ok(Some(Hover {
                                         contents: HoverContents::Markup(MarkupContent {
@@ -569,7 +653,7 @@ impl LanguageServer for Backend {
                     "struct_access" => {
                         let mut variable_name = String::new();
                         if let Some(obj_node) = node.child_by_field_name("called_struct") {
-                            variable_name = parser::get_node_name(obj_node, &doc.text).unwrap_or_default();
+                            variable_name = parser::get_node_name(obj_node, &doc.text.to_string()).unwrap_or_default();
                         }
                         if !variable_name.is_empty() {
                             let mut items: Vec<CompletionItem> = Vec::new();
@@ -620,10 +704,10 @@ impl LanguageServer for Backend {
                         return Ok(None)
                     },
                     _ => {
-                        if let Some(wnode) = parser::find_node_at_cursor(&doc.tree, &pos, &doc.text) {
-                            let op_name = parser::get_node_name(wnode, &doc.text).unwrap_or("".to_string());
+                        if let Some(wnode) = parser::find_node_at_cursor(&doc.tree, &pos, &doc.text.to_string()) {
+                            let op_name = parser::get_node_name(wnode, &doc.text.to_string()).unwrap_or("".to_string());
 
-                            #[cfg(debug_assertions)]
+                            // #[cfg(debug_assertions)]
                             {
                                 let p = wnode.parent().map(|p| p.kind()).unwrap();
                                 self.client.log_message(MessageType::INFO,
@@ -743,7 +827,7 @@ impl LanguageServer for Backend {
                                     return Ok(None)
                                 }
                                 _ => {
-                                    if !op_name.is_empty() {
+                                    if !op_name.is_empty() && doc.doc_type != parser::TreeType::Sco {
                                         if let Some(p) = wnode.parent() {
                                             let pkind = p.kind();
                                             if
@@ -804,9 +888,20 @@ impl LanguageServer for Backend {
     async fn semantic_tokens_full(&self, params: SemanticTokensParams) -> Result<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri;
         let mut dc = self.document_state.write().await;
+        let queries = self.queries.read().await;
         if let Some(doc) = dc.get_mut(&uri) {
-            let mut st = parser::get_semantic_tokens(&doc.query, &doc.tree, &doc.text, None);
-            let inj = parser::get_injections(&doc.query_injection, &doc.tree, &doc.text, &mut doc.csound_parser, &doc.query, &mut doc.py_query, &mut doc.html_query);
+            let mut st = parser::get_semantic_tokens(&queries.csound_highlights, &doc.tree, &doc.text.to_string(), None);
+            let inj = parser::get_injections(
+                &queries.csound_injection,
+                &doc.tree,
+                &doc.text.to_string(),
+                &mut doc.csound_parser,
+                &queries.csound_highlights,
+                &mut doc.py_parser,
+                &queries.py_highlights,
+                &mut doc.html_parser,
+                &queries.html_highlights
+            );
 
             st.extend(inj);
             let stokens = parser::get_delta_pos(&mut st);
@@ -937,12 +1032,12 @@ impl LanguageServer for Backend {
         let dc = self.document_state.read().await;
         if let Some(doc) = dc.get(&uri) {
             let line_index = position.line as usize;
-            let line_text = doc.text.lines().nth(line_index).unwrap_or("");
+            let line_text = doc.text.line(line_index).as_str().unwrap_or("");
             let current_line_size = line_text.len() - line_text.trim_start().len();
             let current_indent_str = &line_text[..current_line_size];
 
             let tab_size = params.options.tab_size as usize;
-            let indent_level = parser::make_indent(&doc.tree, &doc.text, position.line as usize);
+            let indent_level = parser::make_indent(&doc.tree, &doc.text.to_string(), position.line as usize);
             let indent = " ".repeat(indent_level * tab_size);
 
             if current_indent_str == indent {

@@ -98,10 +98,8 @@ pub async fn load_manual_resources(
             let zip_archive_path = temp_dir.join(zip_name);
             let target_dir = manual_dir_path.clone();
 
-            tokio::task::spawn_blocking(move || {
-                if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
-                utils::unzip_file(&zip_archive_path, &target_dir)
-            }).await??;
+            if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
+            utils::unzip_file(&zip_archive_path, &target_dir)?;
         }
     }
 
