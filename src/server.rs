@@ -10,7 +10,7 @@ use serde_json::Value;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{ Client, LanguageServer };
-use tree_sitter::{ InputEdit, Parser, Point, Tree };
+use tree_sitter::{ InputEdit, Point, Tree };
 use tokio::sync::RwLock;
 use std::{
     collections::{ HashMap, HashSet },
@@ -27,9 +27,59 @@ pub struct CurrentDocument {
     pub user_definitions: parser::UserDefinitions,
     pub cached_typed_vars: HashMap<String, String>,
     pub cached_included_udo_files: HashMap<String, resolve_udos::UdoFile>,
-    pub csound_parser: Parser,
-    pub py_parser: Parser,
-    pub html_parser: Parser
+    pub internal_parsers: parser::InternalParsers,
+}
+
+pub fn get_incremental_parsing(doc: &mut CurrentDocument, content_changes: &Vec<TextDocumentContentChangeEvent>) {
+    for change in content_changes {
+        if let Some(range) = change.range {
+            let start_char = doc.text.line_to_char(range.start.line as usize) + range.start.character as usize;
+            let start_byte = doc.text.char_to_byte(start_char);
+
+            let start_position = Point {
+                row: range.start.line as usize,
+                column: range.start.character as usize
+            };
+
+            let old_end_char = doc.text.line_to_char(range.end.line as usize) + range.end.character as usize;
+            let old_end_byte = doc.text.char_to_byte(old_end_char);
+
+            let old_end_position = Point {
+                row: range.end.line as usize,
+                column: range.end.character as usize
+            };
+
+            doc.text.remove(start_char..old_end_char);
+            doc.text.insert(start_char, &change.text);
+
+            let new_end_byte = start_byte + change.text.len();
+            let new_end_char = doc.text.byte_to_char(new_end_byte);
+            let new_end_line = doc.text.char_to_line(new_end_char);
+            let new_end_column = new_end_char - doc.text.line_to_char(new_end_line);
+
+            let new_end_position = Point {
+                row: new_end_line,
+                column: new_end_column
+            };
+
+            let input_edit = InputEdit {
+                start_byte,
+                old_end_byte,
+                new_end_byte,
+                start_position,
+                old_end_position,
+                new_end_position
+            };
+
+            doc.tree.edit(&input_edit);
+            let parsed_tree = parser::parse_doc(&doc.text.to_string(), Some(&doc.tree));
+            doc.tree = parsed_tree.tree;
+        } else {
+            doc.text = Rope::from_str(&change.text);
+            let parsed_tree = parser::parse_doc(&change.text, None);
+            doc.tree = parsed_tree.tree;
+        }
+    }
 }
 
 pub struct Backend {
@@ -188,9 +238,7 @@ impl LanguageServer for Backend {
                 user_definitions: parser::UserDefinitions::new(),
                 cached_typed_vars: HashMap::new(),
                 cached_included_udo_files: HashMap::new(),
-                csound_parser: parsed_tree.csound_parser,
-                py_parser: parsed_tree.py_parser,
-                html_parser: parsed_tree.html_parser,
+                internal_parsers: parser::load_parsers()
             }
         );
     }
@@ -210,61 +258,9 @@ impl LanguageServer for Backend {
         let mut diagnostics = Vec::new();
         let mut cached_diag: HashSet<(u32, u32, String)> = HashSet::new();
         if let Some(doc) = d.get_mut(&uri) {
-            for change in params.content_changes {
-                if let Some(range) = change.range {
-                    let start_char = doc.text.line_to_char(range.start.line as usize) + range.start.character as usize;
-                    let start_byte = doc.text.char_to_byte(start_char);
+            get_incremental_parsing(doc, &params.content_changes); // incremental parsing
 
-                    let start_position = Point {
-                        row: range.start.line as usize,
-                        column: range.start.character as usize
-                    };
-
-                    let old_end_char = doc.text.line_to_char(range.end.line as usize) + range.end.character as usize;
-                    let old_end_byte = doc.text.char_to_byte(old_end_char);
-
-                    let old_end_position = Point {
-                        row: range.end.line as usize,
-                        column: range.end.character as usize
-                    };
-
-                    doc.text.remove(start_char..old_end_char);
-                    doc.text.insert(start_char, &change.text);
-
-                    let new_end_byte = start_byte + change.text.len();
-                    let new_end_char = doc.text.byte_to_char(new_end_byte);
-                    let new_end_line = doc.text.char_to_line(new_end_char);
-                    let new_end_column = new_end_char - doc.text.line_to_char(new_end_line);
-
-                    let new_end_position = Point {
-                        row: new_end_line,
-                        column: new_end_column
-                    };
-
-                    let input_edit = InputEdit {
-                        start_byte,
-                        old_end_byte,
-                        new_end_byte,
-                        start_position,
-                        old_end_position,
-                        new_end_position
-                    };
-
-                    doc.tree.edit(&input_edit);
-                    let parsed_tree = parser::parse_doc(&doc.text.to_string(), Some(&doc.tree));
-                    doc.tree = parsed_tree.tree;
-                    doc.csound_parser = parsed_tree.csound_parser;
-                    doc.py_parser = parsed_tree.py_parser;
-                    doc.html_parser = parsed_tree.html_parser;
-                } else {
-                    doc.text = Rope::from_str(&change.text);
-                    let parsed_tree = parser::parse_doc(&change.text, None);
-                    doc.tree = parsed_tree.tree;
-                    doc.csound_parser = parsed_tree.csound_parser;
-                    doc.py_parser = parsed_tree.py_parser;
-                    doc.html_parser = parsed_tree.html_parser;
-                }
-            }
+            doc.internal_parsers = parser::load_parsers();
 
             let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &doc.text.to_string(), &uri);
             doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
@@ -283,6 +279,35 @@ impl LanguageServer for Backend {
 
             parser::get_semantic_tokens(&csound_queries.csound_highlights, &doc.tree, &doc.text.to_string(), None);
 
+            for (flag, flag_node) in nodes_to_diagnostics.flags.iter() {
+                if let Some(ref flags) = jr.oflag_data {
+                    let mut found = false;
+                    'outer: for values in flags.values() {
+                        let prex: Vec<&str> = values.prefix.split(',').collect();
+                        for p in prex.iter() {
+                            let p = p.split(|c: char| c == '=' || c.is_whitespace()).next().unwrap_or("").trim();
+                            if p == *flag {
+                                found = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+
+                    if !found {
+                        let diag = Diagnostic {
+                            range: parser::get_node_range(&flag_node, None),
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            source: Some("csound-lsp".into()),
+                            message: format!("Unknown flag type: <{}>", &flag),
+                            ..Default::default()
+                        };
+                        if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                            diagnostics.push(diag);
+                        }
+                    }
+                }
+            }
+
             for (ufile_path, ufile) in nodes_to_diagnostics.included_udo_files.iter() {
                 let mut pflag = false;
                 if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
@@ -298,7 +323,7 @@ impl LanguageServer for Backend {
 
                 if pflag {
                     if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
-                        if let Err(e) = entry.iterate_included_udo_file(&mut doc.csound_parser) {
+                        if let Err(e) = entry.iterate_included_udo_file(&mut doc.internal_parsers.csound_parser) {
                             self.client.log_message(MessageType::WARNING, format!("[WARNING]: {}", e)).await
                         }
                     }
@@ -323,7 +348,7 @@ impl LanguageServer for Backend {
                 if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
                     let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
 
-                    // #[cfg(debug_assertions)]
+                    #[cfg(debug_assertions)]
                     {
                         self.client.log_message(MessageType::INFO,
                             format!("UNUSED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
@@ -359,7 +384,7 @@ impl LanguageServer for Backend {
                 if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
                     let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
 
-                    // #[cfg(debug_assertions)]
+                    #[cfg(debug_assertions)]
                     {
                         self.client.log_message(MessageType::INFO,
                             format!("UNDEFINED DEBUG: Kind='{}', parent={}, Text='{}', calls={}, scope={:?}",
@@ -516,7 +541,7 @@ impl LanguageServer for Backend {
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
-                // #[cfg(debug_assertions)]
+                #[cfg(debug_assertions)]
                 {
                     let sib = node.prev_named_sibling().map(|p| p.kind()).unwrap_or("None");
                     self.client.log_message(MessageType::INFO,
@@ -707,7 +732,7 @@ impl LanguageServer for Backend {
                         if let Some(wnode) = parser::find_node_at_cursor(&doc.tree, &pos, &doc.text.to_string()) {
                             let op_name = parser::get_node_name(wnode, &doc.text.to_string()).unwrap_or("".to_string());
 
-                            // #[cfg(debug_assertions)]
+                            #[cfg(debug_assertions)]
                             {
                                 let p = wnode.parent().map(|p| p.kind()).unwrap();
                                 self.client.log_message(MessageType::INFO,
@@ -895,11 +920,11 @@ impl LanguageServer for Backend {
                 &queries.csound_injection,
                 &doc.tree,
                 &doc.text.to_string(),
-                &mut doc.csound_parser,
+                &mut doc.internal_parsers.csound_parser,
                 &queries.csound_highlights,
-                &mut doc.py_parser,
+                &mut doc.internal_parsers.py_parser,
                 &queries.py_highlights,
-                &mut doc.html_parser,
+                &mut doc.internal_parsers.html_parser,
                 &queries.html_highlights
             );
 

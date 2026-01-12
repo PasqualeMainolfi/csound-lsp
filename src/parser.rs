@@ -4,6 +4,7 @@ use crate::utils::{ CLOSE_BLOCKS, CLOSER, OMACROS, OPEN_BLOCKS, OPENER, SEMANTIC
 use crate::resolve_udos::UdoFile;
 use crate::assets;
 use regex::{ Regex, Captures };
+use ropey::Rope;
 
 use rust_embed::{ EmbeddedFile, RustEmbed };
 use tower_lsp::lsp_types::{
@@ -52,7 +53,10 @@ pub fn get_token_lengend() -> SemanticTokensLegend {
 
 pub struct ParsedTree {
     pub tree: Tree,
-    pub tree_type: TreeType,
+    pub tree_type: TreeType
+}
+
+pub struct InternalParsers {
     pub csound_parser: Parser,
     pub py_parser: Parser,
     pub html_parser: Parser,
@@ -74,13 +78,10 @@ pub fn load_queries() -> Queries {
     }
 }
 
-pub fn parse_doc(text: &str, old_tree: Option<&Tree>) -> ParsedTree {
+pub fn load_parsers() -> InternalParsers {
     let mut p = Parser::new();
     let language = LANGUAGE.into();
     p.set_language(&language).unwrap();
-
-    let tree = p.parse(text, old_tree).unwrap();
-    let tree_type = get_doc_type(tree.root_node());
 
     let mut py = Parser::new();
     let py_language = tree_sitter_python::LANGUAGE.into();
@@ -90,12 +91,24 @@ pub fn parse_doc(text: &str, old_tree: Option<&Tree>) -> ParsedTree {
     let html_language = tree_sitter_html::LANGUAGE.into();
     html.set_language(&html_language).unwrap();
 
-    ParsedTree {
-        tree,
-        tree_type,
+    InternalParsers {
         csound_parser: p,
         py_parser: py,
-        html_parser: html
+        html_parser: html,
+    }
+}
+
+pub fn parse_doc(text: &str, old_tree: Option<&Tree>) -> ParsedTree {
+    let mut p = Parser::new();
+    let language = LANGUAGE.into();
+    p.set_language(&language).unwrap();
+
+    let tree = p.parse(text, old_tree).unwrap();
+    let tree_type = get_doc_type(tree.root_node());
+
+    ParsedTree {
+        tree,
+        tree_type
     }
 }
 
@@ -136,7 +149,8 @@ pub struct NodeCollects<'a> {
     pub udt: HashSet<String>,
     pub typed_vars: HashMap<String, String>,
     pub user_definitions: UserDefinitions,
-    pub included_udo_files: HashMap<String, UdoFile>
+    pub included_udo_files: HashMap<String, UdoFile>,
+    pub flags: HashMap<String, Node<'a>>
 }
 
 impl<'a> NodeCollects<'a> {
@@ -149,7 +163,8 @@ impl<'a> NodeCollects<'a> {
             udt: HashSet::new(),
             typed_vars: HashMap::new(),
             user_definitions: UserDefinitions::new(),
-            included_udo_files: HashMap::new()
+            included_udo_files: HashMap::new(),
+            flags: HashMap::new()
         }
     }
 }
@@ -750,7 +765,29 @@ pub fn iterate_tree<'a>(
                         _ => { }
                     }
                 }
-            },            // check ERROR node
+            },
+            "options_block" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "flag_content" {
+                        if let (Some(fi), Some(ft)) = {
+                            let mut child_cursor = child.walk();
+                            (
+                                child.children(&mut child_cursor).find(|n| n.kind() == "flag_identifier"),
+                                child.child_by_field_name("flag_type")
+                            )
+                        } {
+                            let flag = format!(
+                                "{}{}",
+                                get_node_name(fi, &text).unwrap_or_default(),
+                                get_node_name(ft, &text).unwrap_or_default()
+                            );
+                            nodes_to_diagnostics.flags.insert(flag.trim().to_string(), child);
+                        }
+                    }
+                }
+            }
+            // check ERROR node
             "ERROR" => {
                 if let Some(node_name) = get_node_name(node, &text) {
                     let trim_name = node_name.trim();
