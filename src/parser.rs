@@ -722,16 +722,27 @@ pub fn iterate_tree<'a>(
                     .children(&mut c)
                     .find_map(|n| {
                         let close = match n.kind() {
-                            "if_statement" =>  "endif_block",
-                            "while_loop" | "for_loop" | "until_loop" => "kw_od",
-                            "switch_statement" => "kw_switch_end",
+                            "if_statement" => vec!["endif_block", "then_goto"],
+                            "while_loop" | "for_loop" | "until_loop" => vec!["kw_od"],
+                            "switch_statement" => vec!["kw_switch_end"],
                             _ => return None
                         };
                         Some((n, close))
                     });
 
                 if let Some((cnode, expected)) = control_kind {
-                    if !has_specific_node(cnode, expected) {
+                    let is_closed = expected
+                        .iter()
+                        .map(|closer| {
+                            if *closer == "then_goto" {
+                                cnode.child_by_field_name("then_goto").is_some()
+                            } else {
+                                has_specific_node(cnode, closer)
+                            }
+                        })
+                        .any(|c| c == true);
+
+                    if !is_closed {
                         nodes_to_diagnostics.generic_errors.push(GenericError {
                                 node: node,
                                 error_type: GErrors::ControlLoopSyntaxError
@@ -817,11 +828,19 @@ pub fn iterate_tree<'a>(
                                     }
                                 );
                             } else {
-                                nodes_to_diagnostics.generic_errors.push(GenericError {
-                                        node: node,
-                                        error_type: GErrors::Syntax
-                                    }
-                                );
+                                if scope == Scope::Score {
+                                    nodes_to_diagnostics.generic_errors.push(GenericError {
+                                            node: node,
+                                            error_type: GErrors::ScoreStatement
+                                        }
+                                    );
+                                } else {
+                                    nodes_to_diagnostics.generic_errors.push(GenericError {
+                                            node: node,
+                                            error_type: GErrors::Syntax
+                                        }
+                                    );
+                                }
                             }
                         }
                     }
@@ -1045,24 +1064,42 @@ pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String, offset: Op
             let capture_name = &query.capture_names()[capture.index as usize];
             if let Some(token_type) = capture_to_token_type(&capture_name) {
                 let start_position = capture.node.start_position();
+                let end_position = capture.node.end_position();
 
                 let length = (capture.node.end_byte() - capture.node.start_byte()) as u32;
                 let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap() as u32;
 
-                let mut line = start_position.row as u32;
-                let mut col = start_position.column as u32;
-                if let Some(off) = offset {
-                    line += off.row as u32;
-                    if start_position.row == 0 { col += off.column as u32; }
-                }
+                if start_position.row == end_position.row {
+                    let mut line = start_position.row as u32;
+                    let mut col = start_position.column as u32;
+                    if let Some(off) = offset {
+                        line += off.row as u32;
+                        if start_position.row == 0 { col += off.column as u32; }
+                    }
 
-                tokens.push((
-                    line,
-                    col,
-                    length,
-                    ttype,
-                    0
-                ));
+                    tokens.push((line, col, length, ttype, 0));
+                } else {
+                    let start_byte = capture.node.start_byte();
+                    let end_byte = capture.node.end_byte();
+                    let ntext = &text[start_byte..end_byte];
+
+                    for (i, line_content) in ntext.lines().enumerate() {
+                        let current_row = start_position.row + i;
+                        let current_column = if i == 0 { start_position.column } else { 0 };
+                        let lenght = line_content.encode_utf16().count();
+                        if lenght == 0 { continue; }
+
+                        let mut final_row = current_row as u32;
+                        let mut final_column = current_column as u32;
+
+                        if let Some(off) = offset {
+                            final_row += off.row as u32;
+                            if start_position.row == 0 { final_column += off.column as u32; }
+                        }
+
+                        tokens.push((final_row, final_column, length, ttype, 0));
+                    }
+                }
             }
         }
     }
