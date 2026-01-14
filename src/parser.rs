@@ -597,7 +597,8 @@ pub fn iterate_tree<'a>(
                     match p.kind() {
                         "ERROR" => {
                             let scope = find_scope(node, &text);
-                            if scope == Scope::Score {
+                            let nkind = node.kind();
+                            if scope == Scope::Score && nkind != "type_identifier_legacy" {
                                 nodes_to_diagnostics.generic_errors.push(GenericError {
                                         node: node,
                                         error_type: GErrors::ScoreStatement
@@ -703,16 +704,18 @@ pub fn iterate_tree<'a>(
                     if let Some(ifile) = get_node_name(c, &text) {
                         let fpath = ifile.replace("\"", "");
                         let pfile = Path::new(&fpath);
-                        let uf = UdoFile::new(&pfile, uri.clone());
-                        nodes_to_diagnostics.included_udo_files
-                            .entry(pfile.to_string_lossy().to_string())
-                            .and_modify(|m| {
-                                if m.content_hash != uf.content_hash {
-                                    m.content_hash = uf.content_hash.clone();
-                                    m.content = uf.content.clone()
-                                }
-                            })
-                            .or_insert(uf);
+                        if pfile.extension().and_then(|e| e.to_str()) == Some("udo") {
+                            let uf = UdoFile::new(&pfile, uri.clone());
+                            nodes_to_diagnostics.included_udo_files
+                                .entry(pfile.to_string_lossy().to_string())
+                                .and_modify(|m| {
+                                    if m.content_hash != uf.content_hash {
+                                        m.content_hash = uf.content_hash.clone();
+                                        m.content = uf.content.clone()
+                                    }
+                                })
+                                .or_insert(uf);
+                        }
                     }
                 }
             },
@@ -755,8 +758,8 @@ pub fn iterate_tree<'a>(
                 let first_child = node.child(0);
                 if let Some(n) = first_child {
                     match n.kind() {
-                        "kw_instr" => {
-                            if !has_specific_node(node, "kw_endin") {
+                        "instr" => {
+                            if !has_specific_node(node, "endin") {
                                 nodes_to_diagnostics.generic_errors.push(GenericError {
                                         node: node,
                                         error_type: GErrors::InstrBlockSyntaxError
@@ -765,7 +768,7 @@ pub fn iterate_tree<'a>(
                             }
                         },
                         "udo_definition_legacy" | "udo_definition_modern" => {
-                            if !has_specific_node(node, "kw_endop") {
+                            if !has_specific_node(node, "endop") {
                                 nodes_to_diagnostics.generic_errors.push(GenericError {
                                         node: node,
                                         error_type: GErrors::UdoBlockSyntaxError
@@ -946,7 +949,8 @@ pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
         }
 
         if ckind == "score_block" || ckind == "cs_score" {
-            return Scope::Score
+            let pflag = node.parent().map(|p| p.kind() == "macro_name").unwrap_or(false);
+            if pflag { return Scope::Global } else {return Scope::Score }
         }
 
         if ckind == "instrument_block" || ckind == "cs_legacy_file" {

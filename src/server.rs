@@ -178,13 +178,19 @@ impl LanguageServer for Backend {
         if let Err(e) = assets::load_manual_resources(
             &mut global_temp, &mut opcodes, &mut manual_path
         ).await {
-            self.client.log_message(MessageType::WARNING, format!("[WARNING] Csound manual unavailable: {}", e)).await;
+            self.client.log_message(
+                MessageType::WARNING,
+                format!("[WARNING] Csound manual unavailable: {}", e)
+            ).await;
         }
 
         if let Err(e) = assets::read_csound_json_data(
             &mut cs_references,  &manual_path
         ).await {
-            self.client.log_message(MessageType::WARNING, format!("[WARNING] Csound opcodes references unavailable: {}", e)).await;
+            self.client.log_message(
+                MessageType::WARNING,
+                format!("[WARNING] Csound opcodes references unavailable: {}", e)
+            ).await;
         }
 
         // Plugins
@@ -198,17 +204,11 @@ impl LanguageServer for Backend {
                     ).await {
                         self.client.log_message(MessageType::WARNING, format!("[WARNING] Impossible to load plugins: {}", e)).await;
                     } else {
-                        let keys = &plugins_opcodes
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<String>>().join(", ");
-
+                        let keys = &plugins_opcodes.keys().cloned().collect::<Vec<String>>().join(", ");
                         self.client.log_message(MessageType::INFO, format!("[INFO] Loaded plugins: {}", keys)).await;
 
                         // add plugins in cs_references for completion
-                        if let Err(e) = resolve_pulgins::add_plugins_to_cs_references(
-                            &plugins_opcodes, &mut cs_references
-                        ).await {
+                        if let Err(e) = resolve_pulgins::add_plugins_to_cs_references(&plugins_opcodes, &mut cs_references).await {
                             self.client.log_message(MessageType::WARNING, format!("[WARNING] Plugins opcodes: {}", e)).await;
                         }
                     };
@@ -250,11 +250,11 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
-
         let csound_queries = self.queries.read().await;
-
         let mut d = self.document_state.write().await;
         let opcodes = self.opcodes.read().await;
+        let plugins = self.plugins_opcodes.read().await;
+
         let mut diagnostics = Vec::new();
         let mut cached_diag: HashSet<(u32, u32, String)> = HashSet::new();
         if let Some(doc) = d.get_mut(&uri) {
@@ -399,9 +399,7 @@ impl LanguageServer for Backend {
                     for node_range in &var.references {
                         let mut pflag = false;
                         if parent_finded_kind == "macro_usage" {
-                            pflag = doc.cached_included_udo_files
-                                .values()
-                                .any(|v| v.macro_list.contains(&var.var_name));
+                            pflag = doc.cached_included_udo_files.values().any(|v| v.macro_list.contains(&var.var_name));
                         }
 
                         if !pflag {
@@ -429,12 +427,7 @@ impl LanguageServer for Backend {
             for node in nodes_to_diagnostics.opcodes {
                 if let Some(nt) = parser::get_node_name(node, &doc.text.to_string()) {
                     let node_type = nt.split_once(":").map(|(prefix, _)| prefix.to_string()).unwrap_or(nt);
-
-                    let is_included_udo = doc.cached_included_udo_files
-                        .values()
-                        .any(|u| u.udo_list.contains(&node_type));
-
-                    let plugins = self.plugins_opcodes.read().await;
+                    let is_included_udo = doc.cached_included_udo_files.values().any(|u| u.udo_list.contains(&node_type));
 
                     if {
                         !nodes_to_diagnostics.udo.contains(&node_type) &&
@@ -463,10 +456,7 @@ impl LanguageServer for Backend {
 
             for node in nodes_to_diagnostics.types {
                 let type_identifier = parser::get_node_name(node, &doc.text.to_string()).unwrap();
-
-                let is_type_included = doc.cached_included_udo_files
-                    .values()
-                    .any(|t| t.type_list.contains(&type_identifier));
+                let is_type_included = doc.cached_included_udo_files.values().any(|t| t.type_list.contains(&type_identifier));
 
                 if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) && !is_type_included {
                     let diag = Diagnostic {
@@ -669,11 +659,12 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let pos = params.text_document_position.position;
         let uri = params.text_document_position.text_document.uri.clone();
-
         let dc = self.document_state.read().await;
+
         if let Some(doc) = dc.get(&uri) {
             if let Some(node) = parser::find_node_at_position(&doc.tree, &pos) {
                 let jr = self.json_reference_completion_list.read().await;
+
                 match node.kind() {
                     "struct_access" => {
                         let mut variable_name = String::new();
@@ -682,23 +673,29 @@ impl LanguageServer for Backend {
                         }
                         if !variable_name.is_empty() {
                             let mut items: Vec<CompletionItem> = Vec::new();
-                            if let Some(struct_type_name) = doc.cached_typed_vars.get(&variable_name) {
-                                if let Some(udt) = doc.user_definitions.user_defined_types.get(&struct_type_name.clone()) {
-                                    if let Some(ref members) = udt.udt_members {
-                                        for (field_name, field_type) in members.iter() {
-                                            let compl = CompletionItem {
-                                                label: field_name.clone(),
-                                                kind: Some(CompletionItemKind::FIELD),
-                                                detail: Some(format!(": {}", field_type)),
-                                                insert_text: Some(field_name.clone()),
-                                                documentation: Some(Documentation::String(format!(
-                                                    "Field of struct '{}' (Type: {})",
-                                                    variable_name, struct_type_name
-                                                ))),
-                                                ..Default::default()
-                                            };
-                                            items.push(compl);
-                                        }
+                            let struct_type_name = doc.cached_typed_vars.get(&variable_name);
+                            let members = struct_type_name
+                                .and_then(|sname| {
+                                    doc.user_definitions.user_defined_types
+                                        .get(&sname.clone())
+                                        .and_then(|m| m.udt_members.as_ref())
+                                });
+
+                            if let Some(struct_type_name) = struct_type_name {
+                                if let Some(ref members) = members {
+                                    for (field_name, field_type) in members.iter() {
+                                        let compl = CompletionItem {
+                                            label: field_name.clone(),
+                                            kind: Some(CompletionItemKind::FIELD),
+                                            detail: Some(format!(": {}", field_type)),
+                                            insert_text: Some(field_name.clone()),
+                                            documentation: Some(Documentation::String(format!(
+                                                "Field of struct '{}' (Type: {})",
+                                                variable_name, struct_type_name
+                                            ))),
+                                            ..Default::default()
+                                        };
+                                        items.push(compl);
                                     }
                                 }
                                 for (_, udo_file) in doc.cached_included_udo_files.iter() {
@@ -862,8 +859,7 @@ impl LanguageServer for Backend {
                                                 pkind != "flag_content"           &&
                                                 pkind != "struct_access"          &&
                                                 pkind != "ERROR"
-                                            }
-                                            {
+                                            } {
                                                 if let Some(ref list) = jr.opcodes_data {
                                                     let mut items = Vec::new();
                                                     for (n, data) in list {
