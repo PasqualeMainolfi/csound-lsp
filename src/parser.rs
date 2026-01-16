@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use crate::utils::{ CLOSE_BLOCKS, CLOSER, OMACROS, OPEN_BLOCKS, OPENER, SEMANTIC_TOKENS };
+use crate::utils::{ CLOSE_BLOCKS, OMACROS, OPEN_BLOCKS, OPENER, SEMANTIC_TOKENS };
 use crate::resolve_udos::UdoFile;
 use crate::assets;
 use regex::{ Regex, Captures };
@@ -247,8 +247,8 @@ pub struct UserDefinitions {
     pub user_defined_macros: HashMap<String, UserDefinedMacro>,
     pub undefined_vars: Vec<UserDefinedVariable>,
     pub unused_vars: Vec<UserDefinedVariable>,
-    local_defined_vars: HashMap<Scope, HashMap<String, UserDefinedVariable>>,
-    global_defined_vars: HashMap<String, UserDefinedVariable>,
+    pub local_defined_vars: HashMap<Scope, HashMap<String, UserDefinedVariable>>,
+    pub global_defined_vars: HashMap<String, UserDefinedVariable>,
 }
 
 impl UserDefinitions {
@@ -725,32 +725,40 @@ pub fn iterate_tree<'a>(
                     .children(&mut c)
                     .find_map(|n| {
                         let close = match n.kind() {
-                            "if_statement" => vec!["endif_block", "then_goto"],
-                            "while_loop" | "for_loop" | "until_loop" => vec!["kw_od"],
-                            "switch_statement" => vec!["kw_switch_end"],
+                            "if_statement" => vec!["kw_endif", "kw_fi", "then_goto"],
+                            "while_loop" | "for_loop" | "until_loop" => vec!["kw_od", "od"],
+                            "switch_statement" => vec!["kw_switch_end", "endsw"],
                             _ => return None
                         };
                         Some((n, close))
                     });
 
                 if let Some((cnode, expected)) = control_kind {
-                    let is_closed = expected
-                        .iter()
-                        .map(|closer| {
-                            if *closer == "then_goto" {
-                                cnode.child_by_field_name("then_goto").is_some()
-                            } else {
-                                has_specific_node(cnode, closer)
-                            }
-                        })
-                        .any(|c| c == true);
-
-                    if !is_closed {
+                    if has_specific_node(cnode, "control_statement_bounded_error") {
                         nodes_to_diagnostics.generic_errors.push(GenericError {
                                 node: node,
                                 error_type: GErrors::ControlLoopSyntaxError
                             }
                         );
+                    } else {
+                        let is_closed = expected
+                            .iter()
+                            .map(|closer| {
+                                if *closer == "then_goto" {
+                                    cnode.child_by_field_name("then_goto").is_some()
+                                } else {
+                                    has_specific_node(cnode, closer)
+                                }
+                            })
+                            .any(|c| c == true);
+
+                        if !is_closed {
+                            nodes_to_diagnostics.generic_errors.push(GenericError {
+                                    node: node,
+                                    error_type: GErrors::ControlLoopSyntaxError
+                                }
+                            );
+                        }
                     }
                 }
             },
@@ -759,7 +767,7 @@ pub fn iterate_tree<'a>(
                 if let Some(n) = first_child {
                     match n.kind() {
                         "instr" => {
-                            if !has_specific_node(node, "endin") {
+                            if has_specific_node(node, "instr_udo_bounded_error") {
                                 nodes_to_diagnostics.generic_errors.push(GenericError {
                                         node: node,
                                         error_type: GErrors::InstrBlockSyntaxError
@@ -768,7 +776,7 @@ pub fn iterate_tree<'a>(
                             }
                         },
                         "udo_definition_legacy" | "udo_definition_modern" => {
-                            if !has_specific_node(node, "endop") {
+                            if has_specific_node(node, "instr_udo_bounded_error") {
                                 nodes_to_diagnostics.generic_errors.push(GenericError {
                                         node: node,
                                         error_type: GErrors::UdoBlockSyntaxError
@@ -1214,13 +1222,16 @@ fn find_first_node_down_in_list<'a>(node: &Node<'a>, names: &[&'static str]) -> 
 }
 
 pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
-    let mut indent: usize = 0;
+    let mut indent: i32 = 0;
     let root = tree.root_node();
 
-    let spoint = Point { row: line, column: 0 };
-    let epoint = Point { row: line, column: 9999 };
+    let line_text = text.lines().nth(line).unwrap_or("");
+    let first_non_whitespace = line_text.chars().take_while(|c| c.is_whitespace()).count();
 
-    if let Some(node) = root.descendant_for_point_range(spoint, epoint) {
+    let spoint = Point { row: line, column: first_non_whitespace };
+    // let epoint = Point { row: line, column: 9999 };
+
+    if let Some(node) = root.descendant_for_point_range(spoint, spoint) {
         let mut current = Some(node);
         let mut  depth = 0;
         while let Some(n) = current {
@@ -1245,12 +1256,17 @@ pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
                 if indent > 0 { indent -= 1; }
             }
 
+            let is_middle = nkind == "kw_elseif" || nkind == "kw_else";
+            if is_middle && start_row == line {
+                indent -= 1;
+            }
+
             current = n.parent();
             depth += 1;
 
         }
     }
-    indent
+    if indent < 0 { return 0 } else { return indent as usize };
 }
 
 pub fn add_local_udos_to_cs_references(udos: &HashMap<String, String>, cs_references: &mut assets::CsoundJsonData) -> bool {
@@ -1277,7 +1293,9 @@ fn has_specific_node(node: Node, expected_kind: &str) -> bool {
         let n = cursor.node();
         if skip_root {
             if n.kind() == "ERROR" { return false; }
-            if n.kind() == expected_kind { return true; }
+            if n.kind() == expected_kind {
+                if !n.is_missing() { return true; }
+            }
         }
 
         if cursor.goto_first_child() {

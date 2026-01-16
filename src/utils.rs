@@ -38,68 +38,40 @@ pub const OMACROS: [&'static str; 13] = [
     "M_SQRT1_2"
 ];
 
-pub const OPEN_BLOCKS: [&'static str; 16] = [
+pub const OPEN_BLOCKS: [&'static str; 10] = [
     "instrument_definition",
     "udo_definition_legacy",
     "udo_definition_modern",
     "internal_code_block",
     "if_statement",
-    "goto_statement",
-    "then_block",
-    "else_block",
-    "elseif_block",
     "switch_statement",
-    "case_block",
-    "default_block",
     "while_loop",
     "until_loop",
     "for_loop" ,
     "score_nestable_loop"
 ];
 
-pub const CLOSE_BLOCKS: [&'static str; 16] = [
-    "kw_endin",
-    "kw_endop",
-    "kw_endif",
+pub const CLOSE_BLOCKS: [&'static str; 10] = [
+    "endin",
+    "endop",
     "kw_fi",
+    "kw_endif",
     "kw_od",
     "kw_switch_end",
-    "kw_else",
-    "kw_elseif",
-    "kw_case_key",
-    "kw_default_key",
+    "kw_case",
+    "kw_default",
     "endsw",
-    "else_block",
-    "elseif_block",
-    "case_header",
-    "default_header",
     "}"
 ];
 
-pub const OPENER: [&'static str; 14] = [
-    "kw_if",
-    "kw_tif",
-    "kw_while",
-    "kw_until",
-    "kw_for",
+pub const OPENER: [&'static str; 7] = [
     "kw_then",
     "kw_ithen",
     "kw_kthen",
-    "kw_instr",
-    "kw_opcode",
+    "instr",
+    "opcode",
     "kw_do",
-    "kw_switch",
-    "open_raw_string",
     "{"
-];
-
-pub const CLOSER: [&'static str; 6] = [
-    "kw_fi",
-    "kw_od",
-    "kw_endin",
-    "kw_endop",
-    "kw_endsw",
-    "}"
 ];
 
 #[derive(Deserialize)]

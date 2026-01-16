@@ -854,14 +854,42 @@ impl LanguageServer for Backend {
                                             let pkind = p.kind();
                                             if
                                             {
-                                                wnode.kind() != "legacy_udo_args" &&
-                                                pkind != "modern_udo_inputs"      &&
-                                                pkind != "flag_content"           &&
-                                                pkind != "struct_access"          &&
+                                                pkind != "flag_content"           && pkind != "struct_access"     &&
+                                                wnode.kind() != "legacy_udo_args" && pkind != "modern_udo_inputs" &&
                                                 pkind != "ERROR"
                                             } {
+                                                let mut items = Vec::new();
+                                                let local_scope = parser::find_scope(wnode, &doc.text.to_string());
+                                                if let Some(s) = &doc.user_definitions.local_defined_vars.get(&local_scope) {
+                                                    for var in s.values() {
+                                                        if !var.is_undefined {
+                                                            items.push(CompletionItem {
+                                                                label: var.var_name.clone(),
+                                                                kind: Some(CompletionItemKind::VARIABLE),
+                                                                insert_text: Some(var.var_name.clone()),
+                                                                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                                                                documentation: Some(Documentation::String("User-defined local variable".to_string())),
+                                                                ..Default::default()
+                                                                }
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                for var in doc.user_definitions.global_defined_vars.values() {
+                                                    if !var.is_undefined {
+                                                        items.push(CompletionItem {
+                                                            label: var.var_name.clone(),
+                                                            kind: Some(CompletionItemKind::VARIABLE),
+                                                            insert_text: Some(var.var_name.clone()),
+                                                            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                                                            documentation: Some(Documentation::String("User-defined global variable".to_string())),
+                                                            ..Default::default()
+                                                            }
+                                                        )
+                                                    }
+                                                }
+
                                                 if let Some(ref list) = jr.opcodes_data {
-                                                    let mut items = Vec::new();
                                                     for (n, data) in list {
                                                         if n.starts_with(&op_name) {
                                                             let data_body = data.get_string_from_body();
