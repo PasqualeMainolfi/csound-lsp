@@ -1,8 +1,5 @@
 use crate::{
-    parser,
-    assets,
-    resolve_udos,
-    resolve_pulgins
+    assets, parser, resolve_pulgins, resolve_udos, utils
 };
 
 use ropey::Rope;
@@ -531,7 +528,7 @@ impl LanguageServer for Backend {
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
-                #[cfg(debug_assertions)]
+                // #[cfg(debug_assertions)]
                 {
                     let sib = node.prev_named_sibling().map(|p| p.kind()).unwrap_or("None");
                     self.client.log_message(MessageType::INFO,
@@ -860,15 +857,17 @@ impl LanguageServer for Backend {
                                             } {
                                                 let mut items = Vec::new();
                                                 let local_scope = parser::find_scope(wnode, &doc.text.to_string());
+                                                let current_start_byte = utils::position_to_start_byte(&pos, &doc.text.to_string());
                                                 if let Some(s) = &doc.user_definitions.local_defined_vars.get(&local_scope) {
                                                     for var in s.values() {
-                                                        if !var.is_undefined {
+                                                        if !var.is_undefined && var.node_location <= current_start_byte {
+                                                            let vtype = var.data_type.as_ref().map(|t| t.to_string()).unwrap_or("".to_string());
                                                             items.push(CompletionItem {
                                                                 label: var.var_name.clone(),
                                                                 kind: Some(CompletionItemKind::VARIABLE),
                                                                 insert_text: Some(var.var_name.clone()),
                                                                 insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-                                                                documentation: Some(Documentation::String("User-defined local variable".to_string())),
+                                                                documentation: Some(Documentation::String(format!("User-defined local variable: {}", vtype).to_string())),
                                                                 ..Default::default()
                                                                 }
                                                             )
@@ -876,13 +875,14 @@ impl LanguageServer for Backend {
                                                     }
                                                 }
                                                 for var in doc.user_definitions.global_defined_vars.values() {
-                                                    if !var.is_undefined {
+                                                    if !var.is_undefined && var.node_location <= current_start_byte {
+                                                        let vtype = var.data_type.as_ref().map(|t| t.to_string()).unwrap_or("".to_string());
                                                         items.push(CompletionItem {
                                                             label: var.var_name.clone(),
                                                             kind: Some(CompletionItemKind::VARIABLE),
                                                             insert_text: Some(var.var_name.clone()),
                                                             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-                                                            documentation: Some(Documentation::String("User-defined global variable".to_string())),
+                                                            documentation: Some(Documentation::String(format!("User-defined global variable: {}", vtype).to_string())),
                                                             ..Default::default()
                                                             }
                                                         )

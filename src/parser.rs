@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use crate::utils::{ CLOSE_BLOCKS, OMACROS, OPEN_BLOCKS, OPENER, SEMANTIC_TOKENS };
+use crate::utils::{ self, CLOSE_BLOCKS, OMACROS, OPEN_BLOCKS, OPENER, SEMANTIC_TOKENS };
 use crate::resolve_udos::UdoFile;
 use crate::assets;
 use regex::{ Regex, Captures };
@@ -43,6 +43,10 @@ use serde::Deserialize;
 use tree_sitter_python;
 use tree_sitter_html;
 use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
+use once_cell::sync::Lazy;
+
+static SHAPE_VAR_REGEX: Lazy<Regex>  = Lazy::new(|| Regex::new(r"\[\]").unwrap());
+
 
 pub fn get_token_lengend() -> SemanticTokensLegend {
     SemanticTokensLegend {
@@ -222,6 +226,124 @@ impl Display for UserDefinedType {
 }
 
 #[derive(Debug, Clone)]
+pub enum VarDataShape {
+    Scalar,
+    Array(u8),
+    Boolean,
+    Spectra,
+    Expression,
+    Struct(String),
+    Unknown
+}
+
+#[derive(Debug, Clone)]
+pub enum VarDataType {
+    InitTime,
+    KontrolRate,
+    AudioRate,
+    String,
+    Spectral,
+    Macro,
+    InstrDef,
+    Instr,
+    Opcode,
+    OpcodeDef,
+    Complex,
+    Bool,
+    Typedef(String),
+    Unknown
+}
+
+#[derive(Debug, Clone)]
+pub struct VariableData {
+    pub data_type: VarDataType,
+    pub data_shape: VarDataShape
+}
+
+impl Display for VariableData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Type: {:?}, Shape: {:?}", self.data_type, self.data_shape)
+    }
+}
+
+fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, UserDefinedType>) -> Option<VariableData> {
+    let vnode_type = match vnode.kind() {
+        "typed_identifier" | "global_typed_identifier" =>  vnode.child_by_field_name("type")?,
+        "type_identifier_legacy" => vnode,
+        _ => { return None }
+    };
+
+    let typed = get_node_name(vnode_type, &text)?;
+    let absolute_trimmed = typed.trim();
+
+    let legacy_flag = vnode.kind() == "type_identifier_legacy";
+    let trimmed = if legacy_flag {
+        let nog = absolute_trimmed.strip_prefix("g").unwrap_or(&absolute_trimmed);
+        nog.chars().next().map(|c| &nog[..c.len_utf8()]).unwrap_or("")
+    } else {
+        absolute_trimmed
+    };
+
+    let mut is_struct = None;
+
+    let var_type =  trimmed.split("[").next().unwrap_or(&trimmed);
+    let dtype = match var_type {
+        "i"         => VarDataType::InitTime,
+        "k"         => VarDataType::KontrolRate,
+        "a"         => VarDataType::AudioRate,
+        "S"         => VarDataType::String,
+        "b"         => VarDataType::Bool,
+        "f" | "w"   => VarDataType::Spectral,
+        "InstrDef"  => VarDataType::InstrDef,
+        "Instr"     => VarDataType::Instr,
+        "Opcode"    => VarDataType::Opcode,
+        "OpcodeDef" => VarDataType::OpcodeDef,
+        "Complex"   => VarDataType::Complex,
+        _           => {
+            if let Some(t) = udt.get(trimmed) {
+                is_struct = Some(t);
+                VarDataType::Typedef(trimmed.to_string())
+            } else {
+                VarDataType::Unknown
+            }
+        },
+    };
+
+    let shape = {
+        let dimension = SHAPE_VAR_REGEX.find_iter(&absolute_trimmed).count();
+        if dimension != 0 {
+            VarDataShape::Array(dimension as u8)
+        } else {
+            match dtype {
+                VarDataType::InitTime    |
+                VarDataType::KontrolRate |
+                VarDataType::AudioRate   |
+                VarDataType::String     => VarDataShape::Scalar,
+                VarDataType::Bool       => VarDataShape::Boolean,
+                VarDataType::Spectral   => VarDataShape::Spectra,
+                VarDataType::Unknown    => VarDataShape::Unknown,
+                _                       => {
+                    if let Some(struct_def) = is_struct {
+                        if let Some(ref m) = struct_def.udt_members {
+                            let mut members = Vec::new();
+                            for member in m.iter() {
+                                members.push(format!("{}:{}", member.0, member.1));
+                            }
+                            VarDataShape::Struct(members.join(", "))
+                        } else {
+                            VarDataShape::Struct("Unknown members".to_string())
+                        }
+                    } else {
+                        VarDataShape::Expression
+                    }
+                }
+            }
+        }
+    };
+    Some(VariableData { data_type: dtype, data_shape: shape })
+}
+
+#[derive(Debug, Clone)]
 pub struct UserDefinedVariable {
     pub node_location: usize,
     pub var_name: String,
@@ -229,7 +351,8 @@ pub struct UserDefinedVariable {
     pub var_calls: usize,
     pub is_undefined: bool,
     pub is_unused: bool,
-    pub references: Vec<Range>
+    pub references: Vec<Range>,
+    pub data_type: Option<VariableData>
 }
 
 #[derive(Debug, Clone)]
@@ -334,17 +457,27 @@ impl UserDefinitions {
                 var_calls: 1,
                 is_undefined: false,
                 is_unused: false,
-                references: Vec::new()
+                references: Vec::new(),
+                data_type: None
             };
 
             if OMACROS.contains(&key.as_str()) {
                 udv.var_scope = Scope::Global;
                 udv.var_calls = 2;
+                udv.data_type = Some(VariableData {
+                    data_type: VarDataType::Macro,
+                    data_shape: VarDataShape::Expression
+                });
+
                 self.global_defined_vars.insert(key.clone(), udv);
+
             } else {
                 let is_write = access_type == AccessVariableType::Write;
                 udv.is_undefined = !is_write;
                 udv.is_unused = is_write;
+
+                let node_to_check = if is_global_syntax { parent.unwrap_or(node) } else { node };
+                udv.data_type = get_variable_data_type(node_to_check, &text, &self.user_defined_types);
 
                 if !is_write { udv.references.push(get_node_range(&node, None)); }
 
@@ -618,6 +751,26 @@ pub fn iterate_tree<'a>(
                     }
                 }
             },
+            "score_nestable_loop" | "score_statement" => {
+                 if let Some(macro_name) = node.child_by_field_name("macro_identifier") {
+                    if let Some(macro_name_text) = get_node_name(macro_name, &text) {
+                        let mname = macro_name_text.trim().to_string();
+                        nodes_to_diagnostics.user_definitions.user_defined_macros
+                            .entry(mname.clone())
+                            .and_modify(|m| {
+                                m.node_location = macro_name.start_byte();
+                                m.macro_label = mname.clone();
+                                m.macro_values = "Score statement macro".to_string()
+                            })
+                            .or_insert_with(|| UserDefinedMacro {
+                                node_location: macro_name.start_byte(),
+                                macro_name: mname.clone(),
+                                macro_label: mname.clone(),
+                                macro_values: "Score statement macro".to_string()
+                            });
+                    }
+                 }
+            }
             // check macros
             "macro_define" => {
                 if let Some(macro_name) = node.child_by_field_name("macro_name") {
@@ -922,22 +1075,9 @@ pub fn find_node_at_position<'a>(tree: &'a Tree, pos: &Position) -> Option<Node<
 pub fn find_node_at_cursor<'a>(tree: &'a Tree, pos: &Position, text: &str) -> Option<Node<'a>> {
     let target_line = pos.line as usize;
     let target_char = pos.character as usize;
-
     let line = text.lines().nth(target_line).unwrap_or("");
-
-    let mut current_char_utf16 = 0 as usize;
-    let mut current_char_utf8 = 0 as usize;
-    for char in line.chars() {
-        let char_utf16 = char.len_utf16();
-        if current_char_utf16 + char_utf16 >= target_char {
-            break;
-        }
-        current_char_utf16 += char_utf16;
-        current_char_utf8 += char.len_utf8();
-    }
-
-    find_node_at_position(&tree, &Position { line: target_line as u32, character: current_char_utf8 as u32})
-
+    let current_char_utf8 = utils::find_char_byte(line, target_char);
+    find_node_at_position(&tree, &Position { line: target_line as u32, character: current_char_utf8 as u32 })
 }
 
 // find local scope
@@ -958,7 +1098,7 @@ pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
 
         if ckind == "score_block" || ckind == "cs_score" {
             let pflag = node.parent().map(|p| p.kind() == "macro_name").unwrap_or(false);
-            if pflag { return Scope::Global } else {return Scope::Score }
+            if pflag { return Scope::Global } else { return Scope::Score }
         }
 
         if ckind == "instrument_block" || ckind == "cs_legacy_file" {
@@ -984,9 +1124,16 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
 
         let p_kind = parent.kind();
 
+        if node.kind() == "identifier" {
+            if p_kind == "macro_usage" { return AccessVariableType::Read; }
+
+            if p_kind == "score_nestable_loop"     || p_kind == "score_statement"       ||
+               p_kind == "score_statement_instr"   || p_kind == "score_statement_func"
+            { return AccessVariableType::Write; }
+        }
+
         if p_kind == "xin_statement"            || p_kind == "modern_udo_inputs"   ||
-           p_kind == "for_loop"                 || p_kind == "score_nestable_loop" ||
-           p_kind == "file_score_nestable_loop" || p_kind == "macro_name"
+           p_kind == "for_loop"                 || p_kind == "macro_define"
         { return AccessVariableType::Write; }
 
         if p_kind.contains("assignment_statement") {

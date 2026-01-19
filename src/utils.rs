@@ -1,7 +1,7 @@
 use std::time::Duration;
 use std::path::{Path, PathBuf};
 use std::io;
-use tower_lsp::lsp_types::SemanticTokenType;
+use tower_lsp::lsp_types::{Position, SemanticTokenType};
 use serde::Deserialize;
 use zip::ZipArchive;
 
@@ -164,4 +164,34 @@ pub fn check_valid_resource_dir(dir: &Path, label: &str) -> Result<PathBuf, Box<
     }
 
     Err(format!("{}: no valid resource dir founded", label).into())
+}
+
+pub fn find_char_byte(line: &str, target_char: usize) -> usize {
+    let mut current_char_utf16 = 0 as usize;
+    let mut current_char_utf8 = 0 as usize;
+    for char in line.chars() {
+        let char_utf16 = char.len_utf16();
+        if current_char_utf16 + char_utf16 >= target_char {
+            break;
+        }
+        current_char_utf16 += char_utf16;
+        current_char_utf8 += char.len_utf8();
+    }
+    current_char_utf8
+}
+
+pub fn position_to_start_byte(pos: &Position, text: &String) -> usize {
+    let target_line = pos.line as usize;
+    let target_char = pos.character as usize;
+    let mut offset = 0;
+    for (i, line) in text.lines().enumerate() {
+        if i == target_line as usize {
+            let current_char = find_char_byte(line, target_char);
+            offset += current_char;
+            break;
+        } else {
+            offset += line.len() + 1;
+        }
+    }
+    offset
 }
