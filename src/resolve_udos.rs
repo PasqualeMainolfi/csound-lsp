@@ -16,7 +16,7 @@ pub struct UdoFile {
     pub path: PathBuf,
     pub content: Option<String>,
     pub content_hash: Option<u64>,
-    pub user_defined_opcodes: HashMap<String, String>,
+    pub user_defined_opcodes: HashMap<String, parser::Udo>,
     pub user_defined_types: HashMap<String, UserDefinedType>,
     pub user_defined_macros: HashMap<String, UserDefinedMacro>,
     pub udo_list: HashSet<String>,
@@ -152,6 +152,7 @@ pub fn add_included_udos_to_cs_references(udos: &HashMap<String, UdoFile>, cs_re
             let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
             for udo in udo_file.udo_list.iter() {
                 if let Some(body) = udo_file.user_defined_opcodes.get(udo) {
+                    let body = body.signature.clone();
                     if let None = opdata.get(udo) {
                         opdata.insert(udo.clone(), OpcodesData {
                             prefix: body.strip_prefix("opcode ").unwrap().to_string(),

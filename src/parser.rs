@@ -7,6 +7,7 @@ use regex::{ Regex, Captures };
 use ropey::Rope;
 
 use rust_embed::{ EmbeddedFile, RustEmbed };
+use tokio::process::Child;
 use tower_lsp::lsp_types::{
     lsif::ItemKind,
     Position,
@@ -46,6 +47,7 @@ use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
 use once_cell::sync::Lazy;
 
 static SHAPE_VAR_REGEX: Lazy<Regex>  = Lazy::new(|| Regex::new(r"\[\]").unwrap());
+static TOKENIKE_VAR: Lazy<Regex>  = Lazy::new(|| Regex::new(r"[ijkapOKVJSbfw](?:\[\])*").unwrap());
 
 
 pub fn get_token_lengend() -> SemanticTokensLegend {
@@ -233,6 +235,7 @@ pub enum VarDataShape {
     Spectra,
     Expression,
     Struct(String),
+    NoShape,
     Unknown
 }
 
@@ -251,6 +254,7 @@ pub enum VarDataType {
     Complex,
     Bool,
     Typedef(String),
+    Void,
     Unknown
 }
 
@@ -266,6 +270,82 @@ impl Display for VariableData {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum UdoType {
+    Legacy,
+    Modern
+}
+
+#[derive(Debug, Clone)]
+pub struct UdoArg {
+    pub position: usize,
+    pub arg: VariableData
+}
+
+#[derive(Debug, Clone)]
+pub struct Udo {
+    pub signature: String,
+    pub inputs: Vec<UdoArg>,
+    pub outputs: Vec<UdoArg>
+}
+
+impl Display for Udo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Udo: {}", self.signature)
+    }
+}
+
+// must be is_valid udo args check first!
+fn get_udo_data_type(arg_list: &String) -> Vec<VariableData> {
+    let trimmed = arg_list.trim();
+
+    if matches!(trimmed, "void" | "0") {
+        return vec![VariableData { data_type: VarDataType::Void, data_shape: VarDataShape::NoShape }]
+    }
+
+    let tokens: Vec<&str> = TOKENIKE_VAR.find_iter(&trimmed).map(|c| c.as_str()).collect();
+
+    let mut data = Vec::new();
+    for t in tokens.iter() {
+        let base_type = t.chars().find(|c| c.is_alphabetic()).unwrap();
+        let dimension = t.matches("[]").count();
+
+        let dtype = match base_type {
+            'i' | 'j' |
+            'o' | 'p'   => VarDataType::InitTime,
+            'k' | 'O' |
+            'P' | 'V' |
+            'J' | 'K'   => VarDataType::KontrolRate,
+            'a'         => VarDataType::AudioRate,
+            'S'         => VarDataType::String,
+            'b'         => VarDataType::Bool,
+            'f' | 'w'   => VarDataType::Spectral,
+            _           => VarDataType::Unknown
+        };
+
+        let shape = {
+            if dimension != 0 {
+                VarDataShape::Array(dimension as u8)
+            } else {
+                match dtype {
+                    VarDataType::InitTime    |
+                    VarDataType::KontrolRate |
+                    VarDataType::AudioRate   |
+                    VarDataType::String     => VarDataShape::Scalar,
+                    VarDataType::Bool       => VarDataShape::Boolean,
+                    VarDataType::Spectral   => VarDataShape::Spectra,
+                    VarDataType::Void       => VarDataShape::NoShape,
+                    _                       => VarDataShape::Unknown
+                }
+            }
+        };
+        data.push(VariableData { data_type: dtype, data_shape: shape });
+    }
+
+    data
+}
+
+// also use for modern udo inputs parse
 fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, UserDefinedType>) -> Option<VariableData> {
     let vnode_type = match vnode.kind() {
         "typed_identifier" | "global_typed_identifier" =>  vnode.child_by_field_name("type")?,
@@ -288,7 +368,7 @@ fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, User
 
     let var_type =  trimmed.split("[").next().unwrap_or(&trimmed);
     let dtype = match var_type {
-        "i"         => VarDataType::InitTime,
+        "i"          => VarDataType::InitTime,
         "k"         => VarDataType::KontrolRate,
         "a"         => VarDataType::AudioRate,
         "S"         => VarDataType::String,
@@ -299,7 +379,7 @@ fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, User
         "Opcode"    => VarDataType::Opcode,
         "OpcodeDef" => VarDataType::OpcodeDef,
         "Complex"   => VarDataType::Complex,
-        _           => {
+        _               => {
             if let Some(t) = udt.get(trimmed) {
                 is_struct = Some(t);
                 VarDataType::Typedef(trimmed.to_string())
@@ -321,6 +401,7 @@ fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, User
                 VarDataType::String     => VarDataShape::Scalar,
                 VarDataType::Bool       => VarDataShape::Boolean,
                 VarDataType::Spectral   => VarDataShape::Spectra,
+                VarDataType::Void       => VarDataShape::NoShape,
                 VarDataType::Unknown    => VarDataShape::Unknown,
                 _                       => {
                     if let Some(struct_def) = is_struct {
@@ -366,7 +447,7 @@ pub struct UserDefinedMacro {
 #[derive(Debug)]
 pub struct UserDefinitions {
     pub user_defined_types: HashMap<String, UserDefinedType>,
-    pub user_defined_opcodes: HashMap<String, String>,
+    pub user_defined_opcodes: HashMap<String, Udo>,
     pub user_defined_macros: HashMap<String, UserDefinedMacro>,
     pub undefined_vars: Vec<UserDefinedVariable>,
     pub unused_vars: Vec<UserDefinedVariable>,
@@ -537,16 +618,41 @@ impl UserDefinitions {
                 let outputs_text = get_node_name(outputs, &text).unwrap();
                 formats.push(outputs_text);
             }
-            let opcode_format = match node.kind() {
-                "udo_definition_legacy" => format!("opcode {} {}", key, formats.join(", ")),
-                "udo_definition_modern" => format!("opcode {} {}", key, formats.join(":")),
-                _ => { "No defition".to_string() }
+
+            let (opcode_format, inputs, outputs) = match node.kind() {
+                "udo_definition_legacy" => {
+                    let form = format!("opcode {} {}", key, formats.join(", "));
+                    let inps = get_udo_data_type(&formats[1]);
+                    let outs = get_udo_data_type(&formats[0]);
+                    (form, inps, outs)
+                },
+                "udo_definition_modern" => {
+                    let form = format!("opcode {} {}", key, formats.join(":"));
+                    let inp_text: String = formats[0].chars().filter(|c| !matches!(*c, '(' | ')')).collect();
+                    let inp_text = inp_text
+                        .split(',')
+                        .filter_map(|i| i.split(':').last())
+                        .map(|s| s.trim().to_string())
+                        .collect::<Vec<String>>()
+                        .join("");
+                    let out_text = formats[1].chars().filter(|c| !matches!(*c, '(' | ')')).collect();
+
+                    let inps = get_udo_data_type(&inp_text);
+                    let outs = get_udo_data_type(&out_text);
+                    (form, inps, outs)
+                },
+                _ => { ("No defition".to_string(), vec![], vec![]) }
             };
+
+            let arg_inputs: Vec<UdoArg> = inputs.iter().enumerate().map(|(p, v)| UdoArg { position: p, arg: v.clone()}).collect();
+            let arg_outputs: Vec<UdoArg> = outputs.iter().enumerate().map(|(p, v)| UdoArg { position: p, arg: v.clone()}).collect();
+
+            let udo = Udo { signature: opcode_format, inputs: arg_inputs, outputs: arg_outputs };
             if !self.user_defined_opcodes.contains_key(key) {
-                self.user_defined_opcodes.insert(key.clone(), opcode_format);
+                self.user_defined_opcodes.insert(key.clone(), udo);
             } else {
                 if let Some (f) = self.user_defined_opcodes.get_mut(key) {
-                    *f = opcode_format;
+                    *f = udo;
                 }
             }
         }
@@ -843,13 +949,59 @@ pub fn iterate_tree<'a>(
                     }
                 }
             },
-            "score_statement_i" => {
-                let pkind = node.parent().map(|p| p.kind()).unwrap();
-                if pkind == "ERROR" {
-                    nodes_to_diagnostics.generic_errors.push(GenericError {
-                        node: node,
-                        error_type: GErrors::MissingPfield
-                    });
+            "score_statement_func" => {
+                let node_mode = node.child(0);
+
+                let name = node_mode.map(|c| {
+                    c.child_by_field_name("id").and_then(|n| get_node_name(n, &text))
+                }).unwrap_or(None);
+
+                let is_valid_instr = name
+                    .as_deref()
+                    .and_then(|n| Some(n.trim()
+                        .strip_prefix("i")
+                        .is_some() && node.child_count() >= 3));
+
+                match is_valid_instr {
+                    Some(condition) => {
+                        if !condition {
+                                nodes_to_diagnostics.generic_errors.push(GenericError {
+                                node: node,
+                                error_type: GErrors::MissingPfield
+                            });
+                        }
+                    },
+                    None => { }
+                }
+            },
+            "score_statement_instr" => {
+                let p1 = node.field_name_for_child(0);
+                if let Some(c) = p1 {
+                    let mode = (c == "statement") as u32;
+                    let is_valid_instr = {
+                        let p1 = node.field_name_for_child(0 + mode);
+                        let p2 = node.field_name_for_child(1 + mode);
+                        let p3 = node.field_name_for_child(2 + mode);
+                        let ans = if !p1.is_some() || !p2.is_some() || !p3.is_some() {
+                            false
+                        } else {
+                            let p1 = p1.unwrap_or("");
+                            let p2 = p2.unwrap_or("");
+                            let p3 = p3.unwrap_or("");
+                            if !matches!(p1, "instr" | "statement_instr" | "statement_macro_instr") || p2 != "start_time" || p3 != "duration" {
+                                false
+                            } else {
+                                true
+                            }
+                        };
+                        ans
+                    };
+                    if !is_valid_instr {
+                        nodes_to_diagnostics.generic_errors.push(GenericError {
+                            node: node,
+                            error_type: GErrors::MissingPfield
+                        });
+                    }
                 }
             },
             "include_directive" => {
@@ -1128,7 +1280,8 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
             if p_kind == "macro_usage" { return AccessVariableType::Read; }
 
             if p_kind == "score_nestable_loop"     || p_kind == "score_statement"       ||
-               p_kind == "score_statement_instr"   || p_kind == "score_statement_func"
+               p_kind == "score_statement_instr"   || p_kind == "score_statement_func"  ||
+               p_kind == "score_statement_wm"
             { return AccessVariableType::Write; }
         }
 
@@ -1416,10 +1569,11 @@ pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
     if indent < 0 { return 0 } else { return indent as usize };
 }
 
-pub fn add_local_udos_to_cs_references(udos: &HashMap<String, String>, cs_references: &mut assets::CsoundJsonData) -> bool {
+pub fn add_local_udos_to_cs_references(udos: &HashMap<String, Udo>, cs_references: &mut assets::CsoundJsonData) -> bool {
     let opdata = cs_references.opcodes_data.as_mut();
     if let Some(opdata) = opdata {
         for (udo, prefix) in udos.iter() {
+            let prefix = prefix.signature.clone();
             if let None = opdata.get(udo) {
                 opdata.insert(udo.clone(), assets::OpcodesData {
                     prefix: prefix.strip_prefix("opcode ").unwrap().to_string(),

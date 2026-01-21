@@ -480,22 +480,22 @@ impl LanguageServer for Backend {
                         format!("Unknown type identifier: <{}>", node_name)
                     },
                     parser::GErrors::ScoreStatement => {
-                        format!("Unknown score statement <{}>", node_name)
+                        "Unknown score statement syntax or missing mandatory p-fields".to_string()
                     },
                     parser::GErrors::MissingPfield => {
-                        format!("Missing mandatory p-fields (p1, p2, p3)")
+                        "Missing mandatory p-fields (p1, p2, p3)".to_string()
                     }
                     parser::GErrors::ControlLoopSyntaxError => {
                         expand_error = Some(doc.text.to_string());
-                        format!("Unclosed control block")
+                        "Unclosed control block".to_string()
                     },
                     parser::GErrors::InstrBlockSyntaxError => {
                         expand_error = Some(doc.text.to_string());
-                        format!("Unclosed instr block")
+                        "Unclosed instr block".to_string()
                     },
                     parser::GErrors::UdoBlockSyntaxError => {
                         expand_error = Some(doc.text.to_string());
-                        format!("Unclosed udo block")
+                        "Unclosed udo block".to_string()
                     }
                 };
 
@@ -528,7 +528,7 @@ impl LanguageServer for Backend {
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
-                // #[cfg(debug_assertions)]
+                #[cfg(debug_assertions)]
                 {
                     let sib = node.prev_named_sibling().map(|p| p.kind()).unwrap_or("None");
                     self.client.log_message(MessageType::INFO,
@@ -544,7 +544,7 @@ impl LanguageServer for Backend {
                 match node_kind {
                     "opcode_name" => {
                         if let Some(ud) = doc.user_definitions.user_defined_opcodes.get(&node_type.to_string()) {
-                            let md = format!("## User-Defined Opcode\n```csound\n{}\n```", ud);
+                            let md = format!("## User-Defined Opcode\n```csound\n{}\n```", ud.signature);
                             return Ok(Some(Hover {
                                 contents: HoverContents::Markup(MarkupContent {
                                         kind: MarkupKind::Markdown,
@@ -558,7 +558,7 @@ impl LanguageServer for Backend {
                         for (_, udo_file) in doc.cached_included_udo_files.iter() {
                             if let Some(ud) = udo_file.user_defined_opcodes.get(&node_type.to_string()) {
                                 let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
-                                let md = format!("## User-Defined Opcode (from `{}`)\n```csound\n{}\n```", udo_source, ud);
+                                let md = format!("## User-Defined Opcode (from `{}`)\n```csound\n{}\n```", udo_source, ud.signature);
                                 return Ok(Some(Hover {
                                     contents: HoverContents::Markup(MarkupContent {
                                             kind: MarkupKind::Markdown,
