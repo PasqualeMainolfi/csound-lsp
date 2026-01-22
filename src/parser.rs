@@ -43,6 +43,7 @@ use tree_sitter::{
 use serde::Deserialize;
 use tree_sitter_python;
 use tree_sitter_html;
+use tree_sitter_json;
 use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
 use once_cell::sync::Lazy;
 
@@ -66,13 +67,15 @@ pub struct InternalParsers {
     pub csound_parser: Parser,
     pub py_parser: Parser,
     pub html_parser: Parser,
+    pub json_parser: Parser,
 }
 
 pub struct Queries {
     pub csound_highlights: Query,
     pub csound_injection: Query,
     pub py_highlights: Query,
-    pub html_highlights: Query
+    pub html_highlights: Query,
+    pub json_highlights: Query
 }
 
 pub fn load_queries() -> Queries {
@@ -81,6 +84,7 @@ pub fn load_queries() -> Queries {
         csound_injection: Query::new(&LANGUAGE.into(), INJECTIONS_QUERY).unwrap(),
         py_highlights: Query::new(&tree_sitter_python::LANGUAGE.into(), tree_sitter_python::HIGHLIGHTS_QUERY).unwrap(),
         html_highlights: Query::new(&tree_sitter_html::LANGUAGE.into(), tree_sitter_html::HIGHLIGHTS_QUERY).unwrap(),
+        json_highlights: Query::new(&tree_sitter_json::LANGUAGE.into(), tree_sitter_json::HIGHLIGHTS_QUERY).unwrap(),
     }
 }
 
@@ -97,10 +101,15 @@ pub fn load_parsers() -> InternalParsers {
     let html_language = tree_sitter_html::LANGUAGE.into();
     html.set_language(&html_language).unwrap();
 
+    let mut json = Parser::new();
+    let json_language = tree_sitter_json::LANGUAGE.into();
+    json.set_language(&json_language).unwrap();
+
     InternalParsers {
         csound_parser: p,
         py_parser: py,
         html_parser: html,
+        json_parser: json,
     }
 }
 
@@ -1008,7 +1017,7 @@ pub fn iterate_tree<'a>(
                 if let Some(c) = node.child_by_field_name("included_file") {
                     if let Some(ifile) = get_node_name(c, &text) {
                         let fpath = ifile.replace("\"", "");
-                        let pfile = Path::new(&fpath);
+                        let pfile = Path::new(fpath.trim());
                         if pfile.extension().and_then(|e| e.to_str()) == Some("udo") {
                             let uf = UdoFile::new(&pfile, uri.clone());
                             nodes_to_diagnostics.included_udo_files
@@ -1455,7 +1464,9 @@ pub fn get_injections(
     py_parser: &mut Parser,
     py_query: &Query,
     html_parser: &mut Parser,
-    html_query: &Query
+    html_query: &Query,
+    json_parser: &mut Parser,
+    json_query: &Query
 ) -> Vec<(u32, u32, u32, u32, u32)>
 {
     let mut cursor = QueryCursor::new();
@@ -1496,6 +1507,12 @@ pub fn get_injections(
                     if let Some(html_tree) = html_parser.parse(&block, None) {
                         let html_tokens = get_semantic_tokens(&html_query, &html_tree, &block, Some(start_position));
                         stokens.extend(html_tokens);
+                    }
+                },
+                "json" => {
+                    if let Some(json_tree) = json_parser.parse(&block, None) {
+                        let json_tokens = get_semantic_tokens(&json_query, &json_tree, &block, Some(start_position));
+                        stokens.extend(json_tokens);
                     }
                 },
                 "csound" => {
@@ -1541,6 +1558,35 @@ pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
 
             let nkind = n.kind();
             let start_row = n.start_position().row;
+
+            if nkind == "raw_script" {
+                let start_line_text = text.lines().nth(start_row).unwrap_or("");
+                let base_indent = start_line_text.chars().take_while(|c| c.is_whitespace()).count() as i32;
+                indent = base_indent;
+                for i in start_row..line {
+                    if let Some(l) = text.lines().nth(i) {
+                        let clean_line = l.split("//").next().unwrap().split(';').next().unwrap().trim_end();
+
+                        for c in clean_line.chars() {
+                            match c {
+                                '{' | '[' | '(' => indent += 1,
+                                '}' | ']' | ')' => indent -= 1,
+                                _ => {}
+                            }
+                        }
+                        if clean_line.ends_with(':') {
+                            indent += 1;
+                        }
+                    }
+                }
+
+                let current_trimmed = line_text.trim();
+                if current_trimmed.starts_with('}') || current_trimmed.starts_with(']') || current_trimmed.starts_with(')') {
+                    indent -= 1;
+                }
+                if indent < 0 { return 0 } else { return indent as usize };
+            }
+
 
             if OPEN_BLOCKS.iter().any(|k| *k == n.kind()) {
                 if start_row < line { indent += 1; }

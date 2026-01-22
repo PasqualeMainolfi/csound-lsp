@@ -528,7 +528,7 @@ impl LanguageServer for Backend {
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
-                #[cfg(debug_assertions)]
+                // #[cfg(debug_assertions)]
                 {
                     let sib = node.prev_named_sibling().map(|p| p.kind()).unwrap_or("None");
                     self.client.log_message(MessageType::INFO,
@@ -949,7 +949,9 @@ impl LanguageServer for Backend {
                 &mut doc.internal_parsers.py_parser,
                 &queries.py_highlights,
                 &mut doc.internal_parsers.html_parser,
-                &queries.html_highlights
+                &queries.html_highlights,
+                &mut doc.internal_parsers.json_parser,
+                &queries.json_highlights
             );
 
             st.extend(inj);

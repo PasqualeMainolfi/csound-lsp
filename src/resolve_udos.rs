@@ -39,18 +39,17 @@ impl UdoFile {
         };
 
         let bytes = std::fs::read(&full_path).ok();
-        let mut content: Option<String> = None;
         let mut h: Option<u64> = None;
-        if let Some(c) = bytes {
+        let cont = bytes.as_ref().map(|c| {
             let mut hasher = DefaultHasher::new();
             c.hash(&mut hasher);
             h = Some(hasher.finish());
-            content = String::from_utf8(c).ok();
-        }
+            String::from_utf8_lossy(&c).to_string()
+        });
 
         Self {
             path: full_path,
-            content,
+            content: cont,
             content_hash: h,
             user_defined_opcodes: HashMap::new(),
             user_defined_types: HashMap::new(),
@@ -116,7 +115,6 @@ impl UdoFile {
                                             });
 
                                         macro_list.insert(mid);
-
                                     }
                                 }
                             }
@@ -148,7 +146,7 @@ impl UdoFile {
 pub fn add_included_udos_to_cs_references(udos: &HashMap<String, UdoFile>, cs_references: &mut assets::CsoundJsonData) -> bool {
     let opdata = cs_references.opcodes_data.as_mut();
     if let Some(opdata) = opdata {
-        for (_, udo_file) in udos.iter() {
+        for udo_file in udos.values() {
             let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
             for udo in udo_file.udo_list.iter() {
                 if let Some(body) = udo_file.user_defined_opcodes.get(udo) {
