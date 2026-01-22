@@ -1358,6 +1358,7 @@ fn capture_to_token_type(capture: &str) -> Option<SemanticTokenType> {
         "constant" |
         "constant.builtin" |
         "constant.builtin.emphasis" |
+        "string.special.key" |
         "property"                  => Some(SemanticTokenType::PROPERTY),
         "tag" |
         "tag.emphsis"               => Some(SemanticTokenType::NAMESPACE),
@@ -1388,7 +1389,7 @@ pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String, offset: Op
                 let end_position = capture.node.end_position();
 
                 let length = (capture.node.end_byte() - capture.node.start_byte()) as u32;
-                let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap() as u32;
+                let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap_or(8) as u32;
 
                 if start_position.row == end_position.row {
                     let mut line = start_position.row as u32;
