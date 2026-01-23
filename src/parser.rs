@@ -47,8 +47,8 @@ use tree_sitter_json;
 use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
 use once_cell::sync::Lazy;
 
-static SHAPE_VAR_REGEX: Lazy<Regex>  = Lazy::new(|| Regex::new(r"\[\]").unwrap());
-static TOKENIKE_VAR: Lazy<Regex>  = Lazy::new(|| Regex::new(r"[ijkapOKVJSbfw](?:\[\])*").unwrap());
+static SHAPE_VAR_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\]").unwrap());
+static TOKENIKE_VAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ijkapOKVJSbfw](?:\[\])*").unwrap());
 
 
 pub fn get_token_lengend() -> SemanticTokensLegend {
@@ -202,6 +202,7 @@ pub enum Scope {
 pub enum AccessVariableType {
     Read,
     Write,
+    WithoutDefinition,
     Update
 }
 
@@ -248,7 +249,7 @@ pub enum VarDataShape {
     Unknown
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VarDataType {
     InitTime,
     KontrolRate,
@@ -270,7 +271,8 @@ pub enum VarDataType {
 #[derive(Debug, Clone)]
 pub struct VariableData {
     pub data_type: VarDataType,
-    pub data_shape: VarDataShape
+    pub data_shape: VarDataShape,
+    pub is_array: bool
 }
 
 impl Display for VariableData {
@@ -309,7 +311,7 @@ fn get_udo_data_type(arg_list: &String) -> Vec<VariableData> {
     let trimmed = arg_list.trim();
 
     if matches!(trimmed, "void" | "0") {
-        return vec![VariableData { data_type: VarDataType::Void, data_shape: VarDataShape::NoShape }]
+        return vec![VariableData { data_type: VarDataType::Void, data_shape: VarDataShape::NoShape, is_array: false }]
     }
 
     let tokens: Vec<&str> = TOKENIKE_VAR.find_iter(&trimmed).map(|c| c.as_str()).collect();
@@ -348,7 +350,7 @@ fn get_udo_data_type(arg_list: &String) -> Vec<VariableData> {
                 }
             }
         };
-        data.push(VariableData { data_type: dtype, data_shape: shape });
+        data.push(VariableData { data_type: dtype, data_shape: shape, is_array: dimension != 0 });
     }
 
     data
@@ -377,7 +379,7 @@ fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, User
 
     let var_type =  trimmed.split("[").next().unwrap_or(&trimmed);
     let dtype = match var_type {
-        "i"          => VarDataType::InitTime,
+        "i"         => VarDataType::InitTime,
         "k"         => VarDataType::KontrolRate,
         "a"         => VarDataType::AudioRate,
         "S"         => VarDataType::String,
@@ -398,8 +400,8 @@ fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, User
         },
     };
 
+    let dimension = SHAPE_VAR_REGEX.find_iter(&absolute_trimmed).count();
     let shape = {
-        let dimension = SHAPE_VAR_REGEX.find_iter(&absolute_trimmed).count();
         if dimension != 0 {
             VarDataShape::Array(dimension as u8)
         } else {
@@ -430,7 +432,7 @@ fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, User
             }
         }
     };
-    Some(VariableData { data_type: dtype, data_shape: shape })
+    Some(VariableData { data_type: dtype, data_shape: shape, is_array: dimension != 0 })
 }
 
 #[derive(Debug, Clone)]
@@ -462,6 +464,7 @@ pub struct UserDefinitions {
     pub unused_vars: Vec<UserDefinedVariable>,
     pub local_defined_vars: HashMap<Scope, HashMap<String, UserDefinedVariable>>,
     pub global_defined_vars: HashMap<String, UserDefinedVariable>,
+    pub vars_without_definition: HashSet<String>
 }
 
 impl UserDefinitions {
@@ -473,13 +476,17 @@ impl UserDefinitions {
             undefined_vars: Vec::new(),
             unused_vars: Vec::new(),
             local_defined_vars: HashMap::new(),
-            global_defined_vars: HashMap::new()
+            global_defined_vars: HashMap::new(),
+            vars_without_definition: HashSet::new()
         }
     }
 
-    fn update_var_use<'a>(node: Node<'a>, map: &mut HashMap<String, UserDefinedVariable>, k: &String, acc: &AccessVariableType) -> bool {
+    fn update_var_use<'a>(
+        node: Node<'a>, map: &mut HashMap<String, UserDefinedVariable>, nodef_args: &mut HashSet<String>, k: &String, acc: &AccessVariableType
+    ) -> bool {
         let node_range = get_node_range(&node, None);
-        if let Some(var) = map.get_mut(k) {
+
+        let check = if let Some(var) = map.get_mut(k) {
             var.var_calls += 1;
             let p = node.parent().unwrap();
             let pkind = p.kind();
@@ -494,21 +501,33 @@ impl UserDefinitions {
                     var.is_undefined = false;
                     var.node_location = node.start_byte();
                 }
+                AccessVariableType::WithoutDefinition => {
+                    var.is_undefined = false;
+                    var.is_unused = false;
+                    var.node_location = node.start_byte();
+                }
                 AccessVariableType::Update => {
                     var.is_unused = false;
                     if var.is_undefined { var.references.push(node_range); }
                     var.is_undefined = false;
                 }
             }
-            return true;
-        }
-        false
+            true
+        } else {
+            if acc == &AccessVariableType::WithoutDefinition {
+                nodef_args.insert(k.clone()); // TODO: only for opcode arg
+                true
+            } else {
+                false
+            }
+        };
+        check
     }
 
     pub fn add_udv<'a>(&mut self, node: Node<'a>, key: &String, text: &String) {
-        let physical_scope = find_scope(node, text);
+        let physical_scope = find_scope(node, text, &self.user_defined_types);
 
-        let access_type = get_access_type(node, text);
+        let access_type = get_access_type(node, text, &self.user_defined_types);
 
         let parent = node.parent();
         let pkind = parent.map(|p| p.kind()).unwrap_or("");
@@ -528,15 +547,27 @@ impl UserDefinitions {
 
         let mut found = false;
         if preferred_scope == Scope::Global {
-            found = UserDefinitions::update_var_use(node, &mut self.global_defined_vars, &key, &access_type);
+            found = UserDefinitions::update_var_use(
+                node, &mut self.global_defined_vars, &mut self.vars_without_definition, &key, &access_type
+            );
         } else {
             if let Some(local_map) = self.local_defined_vars.get_mut(&preferred_scope) {
-                found = UserDefinitions::update_var_use(node, local_map, &key, &access_type);
+                found = UserDefinitions::update_var_use(
+                    node, local_map, &mut self.vars_without_definition, &key, &access_type
+                );
             }
         }
 
         if !found && preferred_scope != Scope::Global && access_type != AccessVariableType::Write {
-            found = UserDefinitions::update_var_use(node, &mut self.global_defined_vars, &key, &access_type);
+            found = UserDefinitions::update_var_use(
+                node, &mut self.global_defined_vars, &mut self.vars_without_definition, &key, &access_type
+            );
+        }
+
+        if !found && preferred_scope == Scope::Global && access_type != AccessVariableType::WithoutDefinition {
+            found = UserDefinitions::update_var_use(
+                node, &mut self.global_defined_vars, &mut self.vars_without_definition, &key, &access_type
+            );
         }
 
         if !found {
@@ -556,11 +587,11 @@ impl UserDefinitions {
                 udv.var_calls = 2;
                 udv.data_type = Some(VariableData {
                     data_type: VarDataType::Macro,
-                    data_shape: VarDataShape::Expression
+                    data_shape: VarDataShape::Expression,
+                    is_array: false
                 });
 
                 self.global_defined_vars.insert(key.clone(), udv);
-
             } else {
                 let is_write = access_type == AccessVariableType::Write;
                 udv.is_undefined = !is_write;
@@ -690,14 +721,26 @@ pub fn get_node_name<'a>(node: Node<'a>, text: &String) -> Option<String> {
 }
 
 fn check_opcode<'a>(node: Node<'a>) -> Option<OpcodeCheck> {
-    if node.kind() == "opcode_name" {
-        if !has_ancestor_of_kind(node, "udo_definition") {
-            return Some(OpcodeCheck::Opcode)
-        } else {
-            return Some(OpcodeCheck::Udo)
+    let nkind = node.kind();
+    if nkind != "opcode_name" { return None; }
+
+    let mut cnode = node.parent();
+    let mut is_function = false;
+    while let Some(n) = cnode {
+        if matches!(n.kind(), "function_call" | "opcode_statement") {
+            is_function = true;
+            break;
         }
+        cnode = n.parent();
     }
-    None
+
+    if !is_function { return None; }
+
+    if !has_ancestor_of_kind(node, "udo_definition") {
+        return Some(OpcodeCheck::Opcode)
+    } else {
+        return Some(OpcodeCheck::Udo)
+    }
 }
 
 pub fn is_valid_type(type_identifier: &String) -> bool {
@@ -786,7 +829,7 @@ pub fn iterate_tree<'a>(
                     nodes_to_diagnostics.udo.insert(node_name);
                 }
             }
-            None => {}
+            None => { }
         }
 
         match node.kind() {
@@ -826,9 +869,9 @@ pub fn iterate_tree<'a>(
                     pk == "macro_args"                  ||
                     pk == "flag_content"                ||
                     pk == "instrument_definition"       ||
-                    (pk == "struct_access"    && p.child_by_field_name("struct_member").map(|m| m.id() == node.id()).unwrap_or(false))     ||
-                    (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))       ||
-                    (pk == "opcode_statement" && p.child_by_field_name("op_macro").map(|op| op.id() == node.id()).unwrap_or(false)) ||
+                    (pk == "struct_access"    && p.child_by_field_name("struct_member").map(|m| m.id() == node.id()).unwrap_or(false)) ||
+                    (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))          ||
+                    (pk == "opcode_statement" && p.child_by_field_name("op_macro").map(|op| op.id() == node.id()).unwrap_or(false))    ||
                     (pk == "function_call"    && p.child_by_field_name("function").map(|f| f.id() == node.id()).unwrap_or(false))
                 }).unwrap_or(false);
 
@@ -844,7 +887,7 @@ pub fn iterate_tree<'a>(
                 if let Some(p) = parent {
                     match p.kind() {
                         "ERROR" => {
-                            let scope = find_scope(node, &text);
+                            let scope = find_scope(node, &text, &nodes_to_diagnostics.user_definitions.user_defined_types);
                             let nkind = node.kind();
                             if scope == Scope::Score && nkind != "type_identifier_legacy" {
                                 nodes_to_diagnostics.generic_errors.push(GenericError {
@@ -1133,7 +1176,7 @@ pub fn iterate_tree<'a>(
                         (!trim_name.contains("csd_file") && !trim_name.contains("cs_legacy_file"))
                     };
                     if condition {
-                        let scope = find_scope(node, &text);
+                        let scope = find_scope(node, &text, &nodes_to_diagnostics.user_definitions.user_defined_types);
                         let current_parent_kind = node.parent()
                             .map(|p| p.kind())
                             .unwrap_or("");
@@ -1242,20 +1285,32 @@ pub fn find_node_at_cursor<'a>(tree: &'a Tree, pos: &Position, text: &str) -> Op
 }
 
 // find local scope
-pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
+pub fn find_scope<'a>(node: Node<'a>, text: &String, udt: &HashMap<String, UserDefinedType>) -> Scope {
     let mut current_node = node;
     if current_node.kind() == "ERROR" { return Scope::Unknown }
     loop {
         let ckind = current_node.kind();
+
+        let p = current_node.parent();
+        if let Some(gparent) = p {
+            match gparent.kind() {
+                "opcode_statement" => {
+                    if is_valid_not_defined_arg(&gparent, text, udt) { return Scope::Global; }
+                },
+                _ => { }
+            }
+        }
+
         if let Some(node_child) = current_node.child_by_field_name("name") {
             if let Some(n) = get_node_name(node_child, &text) {
                 match ckind {
                     "instrument_definition" | "instr"  => return  Scope::Instr(n),
-                    "udo_definition_modern" | "udo_definition_legacy" => return  Scope::Udo(n),
+                    "udo_definition_modern" | "udo_definition_legacy" => return Scope::Udo(n),
                     _ => { }
                 }
             }
         }
+
 
         if ckind == "score_block" || ckind == "cs_score" {
             let pflag = node.parent().map(|p| p.kind() == "macro_name").unwrap_or(false);
@@ -1275,7 +1330,7 @@ pub fn find_scope<'a>(node: Node<'a>, text: &String) -> Scope {
     Scope::Global
 }
 
-fn get_access_type(node: Node, text: &String) -> AccessVariableType {
+fn get_access_type(node: Node, text: &String, udt: &HashMap<String, UserDefinedType>) -> AccessVariableType {
     let mut current_node = node;
     for i in 0..12 {
         let parent = match current_node.parent() {
@@ -1288,15 +1343,31 @@ fn get_access_type(node: Node, text: &String) -> AccessVariableType {
         if node.kind() == "identifier" {
             if p_kind == "macro_usage" { return AccessVariableType::Read; }
 
-            if p_kind == "score_nestable_loop"     || p_kind == "score_statement"       ||
-               p_kind == "score_statement_instr"   || p_kind == "score_statement_func"  ||
-               p_kind == "score_statement_wm"
+            if p_kind == "score_nestable_loop"      || p_kind == "score_statement"       ||
+                p_kind == "score_statement_instr"   || p_kind == "score_statement_func"  ||
+                p_kind == "score_statement_wm"
             { return AccessVariableType::Write; }
         }
 
         if p_kind == "xin_statement"            || p_kind == "modern_udo_inputs"   ||
-           p_kind == "for_loop"                 || p_kind == "macro_define"
+            p_kind == "for_loop"                 || p_kind == "macro_define"
         { return AccessVariableType::Write; }
+
+        if current_node .kind() == "identifier" && p_kind == "argument_list" {
+            match parent.parent() {
+                Some(gparent) => {
+                    match gparent.kind() {
+                        "opcode_statement" => {
+                            if is_valid_not_defined_arg(&gparent, text, udt) {
+                                return AccessVariableType::WithoutDefinition;
+                            }
+                        },
+                        _ => { }
+                    }
+                },
+                None => { }
+            }
+        }
 
         if p_kind.contains("assignment_statement") {
             let mut cursor = current_node.walk();
@@ -1697,4 +1768,13 @@ pub fn get_doc_type(root_node: Node) -> TreeType {
         if !block { break; }
     }
     TreeType::Unknown
+}
+
+pub fn is_valid_not_defined_arg(node: &Node, text: &String, udt: &HashMap<String, UserDefinedType>) -> bool {
+    node
+        .child_by_field_name("outputs")
+        .and_then(|out_arg| get_variable_data_type(out_arg, text, udt))
+        .and_then(|vdata| Some(
+            (vdata.data_type == VarDataType::Opcode || vdata.data_type == VarDataType::Instr) && vdata.is_array
+        )).unwrap_or(false)
 }

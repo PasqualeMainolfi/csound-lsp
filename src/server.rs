@@ -172,18 +172,14 @@ impl LanguageServer for Backend {
         global_temp.push(GLOBAL_TEMP_DIR);
 
         // Manual
-        if let Err(e) = assets::load_manual_resources(
-            &mut global_temp, &mut opcodes, &mut manual_path
-        ).await {
+        if let Err(e) = assets::load_manual_resources(&mut global_temp, &mut opcodes, &mut manual_path).await {
             self.client.log_message(
                 MessageType::WARNING,
                 format!("[WARNING] Csound manual unavailable: {}", e)
             ).await;
         }
 
-        if let Err(e) = assets::read_csound_json_data(
-            &mut cs_references,  &manual_path
-        ).await {
+        if let Err(e) = assets::read_csound_json_data(&mut cs_references,  &manual_path).await {
             self.client.log_message(
                 MessageType::WARNING,
                 format!("[WARNING] Csound opcodes references unavailable: {}", e)
@@ -251,6 +247,7 @@ impl LanguageServer for Backend {
         let mut d = self.document_state.write().await;
         let opcodes = self.opcodes.read().await;
         let plugins = self.plugins_opcodes.read().await;
+        let mut jr = self.json_reference_completion_list.write().await;
 
         let mut diagnostics = Vec::new();
         let mut cached_diag: HashSet<(u32, u32, String)> = HashSet::new();
@@ -264,7 +261,6 @@ impl LanguageServer for Backend {
             doc.user_definitions = nodes_to_diagnostics.user_definitions;
 
             // add external udo to cs_references
-            let mut jr = self.json_reference_completion_list.write().await;
             if !resolve_udos::add_included_udos_to_cs_references(&doc.cached_included_udo_files, &mut jr) {
                 self.client.log_message(MessageType::WARNING, "[WARNING] Included User-Defined opcodes: internal opcodes cache corrupted!").await;
             }
@@ -423,13 +419,17 @@ impl LanguageServer for Backend {
 
             for node in nodes_to_diagnostics.opcodes {
                 if let Some(nt) = parser::get_node_name(node, &doc.text.to_string()) {
-                    let node_type = nt.split_once(":").map(|(prefix, _)| prefix.to_string()).unwrap_or(nt);
+                    let node_type = nt.split_once(":").map(|(prefix, _)| prefix.to_string()).unwrap_or(nt.clone());
                     let is_included_udo = doc.cached_included_udo_files.values().any(|u| u.udo_list.contains(&node_type));
+
+                    let is_in_completion = jr.opcodes_data.as_ref().map(|op| op.contains_key(&nt)).unwrap_or(false);
+                    // let  = jr.opcodes_data.as_ref().map(|op| op.contains_key(&nt)).unwrap_or(false);
 
                     if {
                         !nodes_to_diagnostics.udo.contains(&node_type) &&
                         !nodes_to_diagnostics.udt.contains(&node_type) &&
                         !plugins.contains_key(&node_type)              &&
+                        !is_in_completion                              &&
                         !is_included_udo
                     } {
                         match opcodes.get(&node_type) {
@@ -528,7 +528,7 @@ impl LanguageServer for Backend {
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
-                // #[cfg(debug_assertions)]
+                #[cfg(debug_assertions)]
                 {
                     let sib = node.prev_named_sibling().map(|p| p.kind()).unwrap_or("None");
                     self.client.log_message(MessageType::INFO,
@@ -536,7 +536,7 @@ impl LanguageServer for Backend {
                         node_kind,
                         parser::get_node_name(node, &doc.text.to_string()).unwrap_or_default(),
                         node.parent().map(|p| p.kind()).unwrap_or("None"),
-                        parser::find_scope(node, &doc.text.to_string()),
+                        parser::find_scope(node, &doc.text.to_string(), &doc.user_definitions.user_defined_types),
                         sib
                     )).await;
                 }
@@ -826,7 +826,7 @@ impl LanguageServer for Backend {
                                         let mut items = Vec::new();
                                         for (_, data) in list {
                                             let data_body = data.get_string_from_body();
-                                            let slice_body: String = String::from(&data_body[1..]);
+                                            let slice_body: String = data_body.strip_prefix("--").unwrap_or(&data_body).to_string();
                                             items.push(CompletionItem {
                                                     label: data.prefix.clone(),
                                                     kind: Some(CompletionItemKind::FIELD),
@@ -856,7 +856,7 @@ impl LanguageServer for Backend {
                                                 pkind != "ERROR"
                                             } {
                                                 let mut items = Vec::new();
-                                                let local_scope = parser::find_scope(wnode, &doc.text.to_string());
+                                                let local_scope = parser::find_scope(wnode, &doc.text.to_string(), &doc.user_definitions.user_defined_types);
                                                 let current_start_byte = utils::position_to_start_byte(&pos, &doc.text.to_string());
                                                 if let Some(s) = &doc.user_definitions.local_defined_vars.get(&local_scope) {
                                                     for var in s.values() {
