@@ -1059,7 +1059,12 @@ pub fn iterate_tree<'a>(
             "include_directive" => {
                 if let Some(c) = node.child_by_field_name("included_file") {
                     if let Some(ifile) = get_node_name(c, &text) {
-                        let fpath = ifile.replace("\"", "");
+
+                        let fpath = ifile
+                            .trim_start_matches(&['<', '"'][..])
+                            .trim_end_matches(&['>', '"'][..])
+                            .to_string();
+
                         let pfile = Path::new(fpath.trim());
                         if pfile.extension().and_then(|e| e.to_str()) == Some("udo") {
                             let uf = UdoFile::new(&pfile, uri.clone());
