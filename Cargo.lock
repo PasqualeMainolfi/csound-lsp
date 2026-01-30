@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "csound-lsp"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "lsp-server",
  "once_cell",
