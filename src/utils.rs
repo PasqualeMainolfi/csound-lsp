@@ -1,8 +1,23 @@
+use crate::parser;
 use std::time::Duration;
 use std::path::{Path, PathBuf};
 use std::io;
-use tower_lsp::lsp_types::{Position, SemanticTokenType};
+use tower_lsp::lsp_types::{
+    CompletionItem,
+    CompletionItemKind,
+    Diagnostic,
+    DiagnosticSeverity,
+    DiagnosticTag,
+    Hover,
+    HoverContents,
+    MarkupContent,
+    MarkupKind,
+    Position,
+    SemanticTokenType,
+    Documentation
+};
 use serde::Deserialize;
+use tree_sitter::Node;
 use zip::ZipArchive;
 
 
@@ -196,4 +211,52 @@ pub fn position_to_start_byte(pos: &Position, text: &String) -> usize {
         }
     }
     offset
+}
+
+pub fn diagnostic_helper(node: &Node, severity: DiagnosticSeverity, message: String, tags: Option<Vec<DiagnosticTag>>) -> Diagnostic {
+    Diagnostic {
+        range: parser::get_node_range(node, None),
+        severity: Some(severity),
+        source: Some("csound-lsp".into()),
+        message: message,
+        tags: tags,
+        ..Default::default()
+    }
+}
+
+pub fn undefined_message_from_kind(nkind: &str) -> String {
+    match nkind {
+        "label_statement" => return "Undefined label".to_string(),
+        "macro_usage"     => return "Undefined macro".to_string(),
+        _                 => return "Undefined variable".to_string(),
+    }
+}
+
+pub fn unused_message_from_kind(nkind: &str) -> String {
+    match nkind {
+        "label_statement" => return "Unused label".to_string(),
+        "macro_usage"     => return "Unused macro".to_string(),
+        _                 => return "Unused variable".to_string(),
+    }
+}
+
+pub fn hover_helper(doc: String) -> Hover {
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: doc,
+        }),
+        range: None,
+    }
+}
+
+pub fn completion_helper(label: String, kind: CompletionItemKind, detail: String, text: String, doc: String) -> CompletionItem {
+    CompletionItem {
+        label: label,
+        kind: Some(kind),
+        detail: Some(detail),
+        insert_text: Some(text),
+        documentation: Some(Documentation::String(doc)),
+        ..Default::default()
+    }
 }

@@ -1,3 +1,4 @@
+use crate::parser::{UdoType, VarDataType};
 use crate::{
     assets, parser, resolve_pulgins, resolve_udos, utils
 };
@@ -278,7 +279,11 @@ impl LanguageServer for Backend {
                     'outer: for values in flags.values() {
                         let prex: Vec<&str> = values.prefix.split(',').collect();
                         for p in prex.iter() {
-                            let p = p.split(|c: char| c == '=' || c.is_whitespace()).next().unwrap_or("").trim();
+                            let p = p.split(|c: char| c == '=' || c.is_whitespace())
+                                .next()
+                                .unwrap_or("")
+                                .trim();
+
                             if p == *flag {
                                 found = true;
                                 break 'outer;
@@ -287,13 +292,9 @@ impl LanguageServer for Backend {
                     }
 
                     if !found {
-                        let diag = Diagnostic {
-                            range: parser::get_node_range(&flag_node, None),
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            source: Some("csound-lsp".into()),
-                            message: format!("Unknown flag type: <{}>", &flag),
-                            ..Default::default()
-                        };
+                        let diag = utils::diagnostic_helper(
+                            &flag_node, DiagnosticSeverity::ERROR, format!("Unknown flag type: <{}>", &flag), None
+                        );
                         if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
                             diagnostics.push(diag);
                         }
@@ -323,23 +324,21 @@ impl LanguageServer for Backend {
                 }
             }
 
-            let ufile_to_remove: Vec<String> = {
-                let mut to_remove = Vec::new();
-                for (p, _) in &doc.cached_included_udo_files {
-                    if !nodes_to_diagnostics.included_udo_files.contains_key(p) {
-                        to_remove.push(p.clone());
-                    }
-                }
-                to_remove
-            };
+            let ufile_to_remove = doc.cached_included_udo_files
+                .keys()
+                .filter(|k| !&nodes_to_diagnostics.included_udo_files.contains_key(*k))
+                .cloned()
+                .collect::<Vec<String>>();
 
-            for p in ufile_to_remove {
-                doc.cached_included_udo_files.remove(&p);
-            }
+            for p in ufile_to_remove { doc.cached_included_udo_files.remove(&p); }
 
             for var in &doc.user_definitions.unused_vars {
-                if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
-                    let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
+                if let Some(finded_node) = doc.tree.root_node()
+                    .descendant_for_byte_range(var.node_location, var.node_location) {
+                    let parent_finded_kind = finded_node
+                        .parent()
+                        .map(|p| p.kind())
+                        .unwrap_or("");
 
                     #[cfg(debug_assertions)]
                     {
@@ -353,29 +352,21 @@ impl LanguageServer for Backend {
                         )).await;
                     }
 
-                    let diag = Diagnostic {
-                        range: parser::get_node_range(&finded_node, None),
-                        severity: Some(DiagnosticSeverity::HINT),
-                        source: Some("csound-lsp".into()),
-                        message: {
-                            match parent_finded_kind {
-                                "label_statement" => "Unused label".to_string(),
-                                "macro_name" => "Unused macro".to_string(),
-                                _ => "Unused variable".to_string(),
-                            }
-                        },
-                        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
-                        ..Default::default()
-                    };
-                    if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
-                        diagnostics.push(diag);
-                    }
+                    let diag = utils::diagnostic_helper(
+                        &finded_node, DiagnosticSeverity::HINT, utils::unused_message_from_kind(parent_finded_kind), Some(vec![DiagnosticTag::UNNECESSARY])
+                    );
+
+                    if !parser::is_diagnostic_cached(&diag, &mut cached_diag) { diagnostics.push(diag); }
                 }
             }
 
             for var in &doc.user_definitions.undefined_vars {
-                if let Some(finded_node) = doc.tree.root_node().descendant_for_byte_range(var.node_location, var.node_location) {
-                    let parent_finded_kind = finded_node.parent().map(|p| p.kind()).unwrap_or("");
+                if let Some(finded_node) = doc.tree.root_node()
+                    .descendant_for_byte_range(var.node_location, var.node_location) {
+                    let parent_finded_kind = finded_node
+                        .parent()
+                        .map(|p| p.kind())
+                        .unwrap_or("");
 
                     #[cfg(debug_assertions)]
                     {
@@ -392,7 +383,9 @@ impl LanguageServer for Backend {
                     for node_range in &var.references {
                         let mut pflag = false;
                         if parent_finded_kind == "macro_usage" {
-                            pflag = doc.cached_included_udo_files.values().any(|v| v.macro_list.contains(&var.var_name));
+                            pflag = doc.cached_included_udo_files
+                                .values()
+                                .any(|v| v.macro_list.contains(&var.var_name));
                         }
 
                         if !pflag {
@@ -400,21 +393,78 @@ impl LanguageServer for Backend {
                                 range: *node_range,
                                 severity: Some(DiagnosticSeverity::ERROR),
                                 source: Some("csound-lsp".into()),
-                                message: {
-                                    match parent_finded_kind {
-                                        "label_statement" => "Undefined label".to_string(),
-                                        "macro_usage" => "Undefined macro".to_string(),
-                                        _ => "Undefined variable".to_string(),
-                                    }
-                                },
+                                message: utils::undefined_message_from_kind(&parent_finded_kind),
                                 ..Default::default()
                             };
-                            if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
-                                diagnostics.push(diag);
-                            }
+                            if !parser::is_diagnostic_cached(&diag, &mut cached_diag) { diagnostics.push(diag); }
                         }
                     }
                 }
+            }
+            // check arg types in xin and xout
+            for udo in doc.user_definitions.user_defined_opcodes.values() {
+                if !udo.is_valid || udo.udo_type == UdoType::Unknown {
+                    todo!() // not valid udo
+                };
+
+                let udo_node = &doc.tree.root_node().descendant_for_point_range(udo.node_position.0, udo.node_position.1);
+                if let Some(n) = udo_node {
+                    // check inputs
+                    match udo.udo_type {
+                        UdoType::Legacy => {
+                            'xin_outer: for child_index in 0..n.child_count() {
+                                let xin_node = n.child(child_index).and_then(|c| if c.kind() == "xin_statement" { Some(c) } else { None });
+                                if let Some(xin_node) = xin_node {
+                                    let mut arg_count = 0;
+                                    for xin_child in xin_node.named_children(&mut xin_node.walk()) {
+                                        if xin_child.kind() == "type_identifier_legacy" {
+                                            let vdata = parser::get_variable_data_type(xin_child, &doc.text.to_string(), &doc.user_definitions.user_defined_types);
+                                            if let Some(vd) = vdata {
+                                                if arg_count < udo.inputs.len() {
+                                                    let source_type = &udo.inputs[arg_count].arg.data_type;
+                                                    let source_shape = &udo.inputs[arg_count].arg.data_shape;
+                                                    if vd.data_type != *source_type || vd.data_shape != *source_shape {
+                                                        let diag = utils::diagnostic_helper(
+                                                            &xin_child, DiagnosticSeverity::ERROR, format!("Positional argument type mismatch in udo signature. Should be: {:?} {:?}", source_type, source_shape), None
+                                                        );
+
+                                                        if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                                                            diagnostics.push(diag);
+                                                        }
+                                                    }
+                                                    if *source_type == VarDataType::Void {
+                                                        break
+                                                    }
+                                                    arg_count += 1;
+                                                } else {
+                                                    let diag = utils::diagnostic_helper(
+                                                        &xin_node, DiagnosticSeverity::ERROR, "Positional argument type mismatch in udo signature: too many arguments".to_string(), None
+                                                    );
+
+                                                    if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                                                        diagnostics.push(diag);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if arg_count < udo.inputs.len() {
+                                        let diag = utils::diagnostic_helper(
+                                            &xin_node, DiagnosticSeverity::ERROR, "Positional argument type mismatch in udo signature: missing arguments".to_string(), None
+                                        );
+
+                                        if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
+                                            diagnostics.push(diag);
+                                        }
+                                    }
+                                    break 'xin_outer;
+                                }
+                            }
+                        }
+                        _ => { }
+                    };
+                }
+                // TODO: check outputs
             }
 
             for node in nodes_to_diagnostics.opcodes {
@@ -423,7 +473,6 @@ impl LanguageServer for Backend {
                     let is_included_udo = doc.cached_included_udo_files.values().any(|u| u.udo_list.contains(&node_type));
 
                     let is_in_completion = jr.opcodes_data.as_ref().map(|op| op.contains_key(&nt)).unwrap_or(false);
-                    // let  = jr.opcodes_data.as_ref().map(|op| op.contains_key(&nt)).unwrap_or(false);
 
                     if {
                         !nodes_to_diagnostics.udo.contains(&node_type) &&
@@ -435,13 +484,10 @@ impl LanguageServer for Backend {
                         match opcodes.get(&node_type) {
                             Some(_) => { },
                             None => {
-                                let diag = Diagnostic {
-                                    range: parser::get_node_range(&node, None),
-                                    severity: Some(DiagnosticSeverity::ERROR),
-                                    source: Some("csound-lsp".into()),
-                                    message: format!("Unknown opcode: <{}>", node_type),
-                                    ..Default::default()
-                                };
+                                let diag = utils::diagnostic_helper(
+                                    &node, DiagnosticSeverity::ERROR, format!("Unknown opcode: <{}>", node_type), None // also check if arg are corrects
+                                );
+
                                 if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
                                     diagnostics.push(diag);
                                 }
@@ -456,16 +502,11 @@ impl LanguageServer for Backend {
                 let is_type_included = doc.cached_included_udo_files.values().any(|t| t.type_list.contains(&type_identifier));
 
                 if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) && !is_type_included {
-                    let diag = Diagnostic {
-                        range: parser::get_node_range(&node, None),
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        source: Some("csound-lsp".into()),
-                        message: format!("Unknown type identifier: <{}>", type_identifier),
-                        ..Default::default()
-                    };
-                    if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
-                        diagnostics.push(diag);
-                    }
+                    let diag = utils::diagnostic_helper(
+                        &node, DiagnosticSeverity::ERROR, format!("Unknown type identifier: <{}>", type_identifier), None
+                    );
+
+                    if !parser::is_diagnostic_cached(&diag, &mut cached_diag) { diagnostics.push(diag); }
                 }
             }
 
@@ -496,7 +537,8 @@ impl LanguageServer for Backend {
                     parser::GErrors::UdoBlockSyntaxError => {
                         expand_error = Some(doc.text.to_string());
                         "Unclosed udo block".to_string()
-                    }
+                    },
+                    _ => { todo!() }
                 };
 
                 let diag = Diagnostic {
@@ -507,9 +549,7 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 };
 
-                if !parser::is_diagnostic_cached(&diag, &mut cached_diag) {
-                    diagnostics.push(diag);
-                }
+                if !parser::is_diagnostic_cached(&diag, &mut cached_diag) { diagnostics.push(diag); }
             }
         }
         self.client.publish_diagnostics(uri, diagnostics, None).await;
@@ -528,7 +568,7 @@ impl LanguageServer for Backend {
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
-                // #[cfg(debug_assertions)]
+                #[cfg(debug_assertions)]
                 {
                     let sib = node.prev_named_sibling().map(|p| p.kind()).unwrap_or("None");
                     self.client.log_message(MessageType::INFO,
@@ -545,52 +585,25 @@ impl LanguageServer for Backend {
                     "opcode_name" => {
                         if let Some(ud) = doc.user_definitions.user_defined_opcodes.get(&node_type.to_string()) {
                             let md = format!("## User-Defined Opcode\n```csound\n{}\n```", ud.signature);
-                            return Ok(Some(Hover {
-                                contents: HoverContents::Markup(MarkupContent {
-                                        kind: MarkupKind::Markdown,
-                                        value: md,
-                                    }),
-                                    range: None,
-                                })
-                            )
+                            self.client.log_message(MessageType::INFO, format!("[INPUTS]: {:?}, [OUTPUTS]: {:?}", ud.inputs, ud.outputs)).await;
+                            return Ok(Some(utils::hover_helper(md)))
                         }
 
                         for (_, udo_file) in doc.cached_included_udo_files.iter() {
                             if let Some(ud) = udo_file.user_defined_opcodes.get(&node_type.to_string()) {
                                 let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
                                 let md = format!("## User-Defined Opcode (from `{}`)\n```csound\n{}\n```", udo_source, ud.signature);
-                                return Ok(Some(Hover {
-                                    contents: HoverContents::Markup(MarkupContent {
-                                            kind: MarkupKind::Markdown,
-                                            value: md,
-                                        }),
-                                        range: None,
-                                    })
-                                )
+                                return Ok(Some(utils::hover_helper(md)))
                             }
                         }
 
                         if let Some(plug) = plugins.get(&node_type) {
                             let pdoc = format!("## Plugin Opcodes (from `{}`)\n{}", plug.libname, plug.documentation);
-                            return Ok(Some(Hover {
-                                contents: HoverContents::Markup(MarkupContent {
-                                        kind: MarkupKind::Markdown,
-                                        value: pdoc,
-                                    }),
-                                    range: None,
-                                })
-                            )
+                            return Ok(Some(utils::hover_helper(pdoc)))
                         }
 
                         if let Some(reference) = opcodes.get(&node_type) {
-                            return Ok(Some(Hover {
-                                contents: HoverContents::Markup(MarkupContent {
-                                        kind: MarkupKind::Markdown,
-                                        value: reference.clone(),
-                                    }),
-                                    range: None,
-                                })
-                            )
+                            return Ok(Some(utils::hover_helper(reference.clone())))
                         } else {
                             self.client.log_message(MessageType::WARNING,
                                 format!("Manual not found for opcode {}", node_type)
@@ -606,41 +619,20 @@ impl LanguageServer for Backend {
                             if let Some(child_type_name) = parser::get_node_name(node, &doc.text.to_string()) {
                                 if let Some(sd) = doc.user_definitions.user_defined_types.get(&child_type_name) {
                                     let md = format!("## User-Defined Type\n```csound\n{}\n```", sd.udt_format);
-                                    return Ok(Some(Hover {
-                                        contents: HoverContents::Markup(MarkupContent {
-                                                kind: MarkupKind::Markdown,
-                                                value: md,
-                                            }),
-                                            range: None,
-                                        })
-                                    )
+                                    return Ok(Some(utils::hover_helper(md)))
                                 }
 
                                 for (_, udo_file) in doc.cached_included_udo_files.iter() {
                                     if let Some(sd) = udo_file.user_defined_types.get(&node_type.to_string()) {
                                         let udo_source = udo_file.path.file_name().unwrap();
                                         let md = format!("## User-Defined Type (from `{:?}`)\n```csound\n{}\n```", udo_source, sd.udt_format);
-                                        return Ok(Some(Hover {
-                                            contents: HoverContents::Markup(MarkupContent {
-                                                    kind: MarkupKind::Markdown,
-                                                    value: md,
-                                                }),
-                                                range: None,
-                                            })
-                                        )
+                                        return Ok(Some(utils::hover_helper(md)))
                                     }
                                 }
 
                                 let splitted_name = node_type.split_once(":").map(|(p, _)| p).unwrap_or(&node_type);
                                 if let Some(reference) = opcodes.get(splitted_name) {
-                                    return Ok(Some(Hover {
-                                        contents: HoverContents::Markup(MarkupContent {
-                                                kind: MarkupKind::Markdown,
-                                                value: reference.clone(),
-                                            }),
-                                            range: None,
-                                        })
-                                    )
+                                    return Ok(Some(utils::hover_helper(reference.clone())))
                                 }
                             }
 
@@ -681,17 +673,12 @@ impl LanguageServer for Backend {
                             if let Some(struct_type_name) = struct_type_name {
                                 if let Some(ref members) = members {
                                     for (field_name, field_type) in members.iter() {
-                                        let compl = CompletionItem {
-                                            label: field_name.clone(),
-                                            kind: Some(CompletionItemKind::FIELD),
-                                            detail: Some(format!(": {}", field_type)),
-                                            insert_text: Some(field_name.clone()),
-                                            documentation: Some(Documentation::String(format!(
-                                                "Field of struct '{}' (Type: {})",
-                                                variable_name, struct_type_name
-                                            ))),
-                                            ..Default::default()
-                                        };
+                                        let documentation = format!("Field of struct '{}' (Type: {})", variable_name, struct_type_name);
+
+                                        let compl = utils::completion_helper(
+                                            field_name.clone(), CompletionItemKind::FIELD, format!(": {}", field_type), field_name.clone(), documentation
+                                        );
+
                                         items.push(compl);
                                     }
                                 }
@@ -699,17 +686,15 @@ impl LanguageServer for Backend {
                                     if let Some(udt) = udo_file.user_defined_types.get(&struct_type_name.clone()) {
                                         if let Some(ref members) = udt.udt_members {
                                             for (field_name, field_type) in members.iter() {
-                                                let compl = CompletionItem {
-                                                    label: field_name.clone(),
-                                                    kind: Some(CompletionItemKind::FIELD),
-                                                    detail: Some(format!(": {}", field_type)),
-                                                    insert_text: Some(field_name.clone()),
-                                                    documentation: Some(Documentation::String(format!(
-                                                        "Field of struct '{}' (Type: {}) (from {:?})",
-                                                        variable_name, struct_type_name, udo_file.path.file_name().unwrap()
-                                                    ))),
-                                                    ..Default::default()
-                                                };
+                                                let documentation = format!(
+                                                    "Field of struct '{}' (Type: {}) (from {:?})",
+                                                    variable_name, struct_type_name, udo_file.path.file_name().unwrap()
+                                                );
+
+                                                let compl = utils::completion_helper(
+                                                    field_name.clone(), CompletionItemKind::FIELD, format!(": {}", field_type), field_name.clone(), documentation
+                                                );
+
                                                 items.push(compl);
                                             }
                                         }
@@ -749,28 +734,19 @@ impl LanguageServer for Backend {
                                     let total_types: Vec<&str> = v.into_iter().collect();
                                     let mut items: Vec<CompletionItem> = Vec::new();
                                     for ty in total_types.iter() {
-                                        items.push(CompletionItem {
-                                            label: ty.to_string(),
-                                            kind: Some(CompletionItemKind::FIELD),
-                                            detail: Some(format!("{}", ty)),
-                                            insert_text: Some(ty.to_string()),
-                                            documentation: Some(Documentation::String(format!("Data type '{}'", ty))),
-                                            ..Default::default()
-                                        });
+                                        let compl = utils::completion_helper(
+                                            ty.to_string(), CompletionItemKind::FIELD, format!("{}", ty), ty.to_string(), format!("Data type '{}'", ty)
+                                        );
+                                        items.push(compl);
                                     }
 
                                     for (_, udo_file) in doc.cached_included_udo_files.iter() {
                                         for ty in udo_file.type_list.iter() {
-                                            items.push(CompletionItem {
-                                                label: ty.to_string(),
-                                                kind: Some(CompletionItemKind::FIELD),
-                                                detail: Some(format!("{}", ty)),
-                                                insert_text: Some(ty.to_string()),
-                                                documentation: Some(Documentation::String(
-                                                    format!("Data type '{}' (from {:?})", ty, udo_file.path.file_name())
-                                                )),
-                                                ..Default::default()
-                                            });
+                                            let documentation = format!("Data type '{}' (from {:?})", ty, udo_file.path.file_name());
+                                            let compl = utils::completion_helper(
+                                                ty.to_string(), CompletionItemKind::FIELD, format!("{}", ty), ty.to_string(), documentation
+                                            );
+                                            items.push(compl);
                                         }
                                     }
 
@@ -779,41 +755,28 @@ impl LanguageServer for Backend {
                                 "$" => {
                                     let mut items = Vec::new();
                                     for (_, value) in doc.user_definitions.user_defined_macros.iter() {
-                                        items.push(CompletionItem {
-                                                label: value.macro_label.clone(),
-                                                kind: Some(CompletionItemKind::FIELD),
-                                                detail: Some(format!("# {} #", value.macro_values)),
-                                                insert_text: Some(value.macro_name.clone()),
-                                                documentation: Some(Documentation::String("user defined macro".to_string())),
-                                                ..Default::default()
-                                            }
+                                        let compl = utils::completion_helper(
+                                            value.macro_label.clone(), CompletionItemKind::FIELD, format!("# {} #", value.macro_values), value.macro_name.clone(), "User Defined Macro".to_string()
                                         );
+                                        items.push(compl);
                                     }
                                     for (_, udo_file) in doc.cached_included_udo_files.iter() {
                                         for (_, value) in udo_file.user_defined_macros.iter() {
                                             let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
-                                            items.push(CompletionItem {
-                                                    label: value.macro_label.clone(),
-                                                    kind: Some(CompletionItemKind::FIELD),
-                                                    detail: Some(format!("# {} #", value.macro_values)),
-                                                    insert_text: Some(value.macro_name.clone()),
-                                                    documentation: Some(Documentation::String(format!("user defined macro (from {})", udo_source).to_string())),
-                                                    ..Default::default()
-                                                }
+                                            let documentation = format!("User Defined Macro (from {})", udo_source);
+                                            let compl = utils::completion_helper(
+                                                value.macro_label.clone(), CompletionItemKind::FIELD, format!("# {} #", value.macro_values), value.macro_name.clone(), documentation
                                             );
+                                            items.push(compl);
                                         }
                                     }
                                     if let Some(ref omacros) = jr.omacros_data {
                                         for (omacro, macro_value) in omacros {
-                                            items.push(CompletionItem {
-                                                    label: omacro.clone(),
-                                                    kind: Some(CompletionItemKind::FIELD),
-                                                    detail: Some(format!("value: {}", macro_value.value)),
-                                                    insert_text: Some(omacro.clone()),
-                                                    documentation: Some(Documentation::String(format!("equivalent to: {}", macro_value.equivalent_to))),
-                                                    ..Default::default()
-                                                }
+                                            let documentation = format!("equivalent to: {}", macro_value.equivalent_to);
+                                            let compl = utils::completion_helper(
+                                                omacro.clone(), CompletionItemKind::FIELD, format!("value: {}", macro_value.value), omacro.clone(), documentation
                                             );
+                                            items.push(compl);
                                         }
                                     }
                                     if !items.is_empty() {

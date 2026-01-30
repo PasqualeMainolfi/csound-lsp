@@ -31,13 +31,7 @@ use std::{
 };
 
 use tree_sitter::{
-    Node,
-    Parser,
-    Point,
-    Tree,
-    Query,
-    QueryCursor,
-    StreamingIterator
+    Node, Parser, Point, Query, QueryCursor, StreamingIterator, Tree
 };
 
 use serde::Deserialize;
@@ -48,7 +42,7 @@ use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
 use once_cell::sync::Lazy;
 
 static SHAPE_VAR_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\]").unwrap());
-static TOKENIKE_VAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ijkapOKVJSbfw](?:\[\])*").unwrap());
+static TOKENIKE_VAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ijkaopOKVJSbfw](?:\[\])*").unwrap());
 
 
 pub fn get_token_lengend() -> SemanticTokensLegend {
@@ -146,7 +140,9 @@ pub enum GErrors {
     MissingPfield,
     ControlLoopSyntaxError,
     InstrBlockSyntaxError,
-    UdoBlockSyntaxError
+    UdoBlockSyntaxError,
+    UdoInputParamsError,
+    UdoOutputsParamsError
 }
 
 #[derive(Debug)]
@@ -237,7 +233,7 @@ impl Display for UserDefinedType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VarDataShape {
     Scalar,
     Array(u8),
@@ -281,10 +277,11 @@ impl Display for VariableData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UdoType {
     Legacy,
-    Modern
+    Modern,
+    Unknown
 }
 
 #[derive(Debug, Clone)]
@@ -295,9 +292,12 @@ pub struct UdoArg {
 
 #[derive(Debug, Clone)]
 pub struct Udo {
+    pub node_position: (Point, Point),
     pub signature: String,
     pub inputs: Vec<UdoArg>,
-    pub outputs: Vec<UdoArg>
+    pub outputs: Vec<UdoArg>,
+    pub udo_type: UdoType,
+    pub is_valid: bool
 }
 
 impl Display for Udo {
@@ -310,7 +310,7 @@ impl Display for Udo {
 fn get_udo_data_type(arg_list: &String) -> Vec<VariableData> {
     let trimmed = arg_list.trim();
 
-    if matches!(trimmed, "void" | "0") {
+    if matches!(trimmed, "void" | "0" | "") {
         return vec![VariableData { data_type: VarDataType::Void, data_shape: VarDataShape::NoShape, is_array: false }]
     }
 
@@ -357,7 +357,7 @@ fn get_udo_data_type(arg_list: &String) -> Vec<VariableData> {
 }
 
 // also use for modern udo inputs parse
-fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, UserDefinedType>) -> Option<VariableData> {
+pub fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, UserDefinedType>) -> Option<VariableData> {
     let vnode_type = match vnode.kind() {
         "typed_identifier" | "global_typed_identifier" =>  vnode.child_by_field_name("type")?,
         "type_identifier_legacy" => vnode,
@@ -390,14 +390,15 @@ fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, User
         "Opcode"    => VarDataType::Opcode,
         "OpcodeDef" => VarDataType::OpcodeDef,
         "Complex"   => VarDataType::Complex,
-        _               => {
+        _           => {
             if let Some(t) = udt.get(trimmed) {
                 is_struct = Some(t);
                 VarDataType::Typedef(trimmed.to_string())
             } else {
                 VarDataType::Unknown
             }
-        },
+
+        }
     };
 
     let dimension = SHAPE_VAR_REGEX.find_iter(&absolute_trimmed).count();
@@ -525,8 +526,9 @@ impl UserDefinitions {
     }
 
     pub fn add_udv<'a>(&mut self, node: Node<'a>, key: &String, text: &String) {
-        let physical_scope = find_scope(node, text, &self.user_defined_types);
+        if key == "" { return }
 
+        let physical_scope = find_scope(node, text, &self.user_defined_types);
         let access_type = get_access_type(node, text, &self.user_defined_types);
 
         let parent = node.parent();
@@ -659,12 +661,12 @@ impl UserDefinitions {
                 formats.push(outputs_text);
             }
 
-            let (opcode_format, inputs, outputs) = match node.kind() {
+            let (opcode_format, inputs, outputs, udo_type) = match node.kind() {
                 "udo_definition_legacy" => {
-                    let form = format!("opcode {} {}", key, formats.join(", "));
-                    let inps = get_udo_data_type(&formats[1]);
-                    let outs = get_udo_data_type(&formats[0]);
-                    (form, inps, outs)
+                    let form = format!("opcode {} {}, {}", key, formats[1], formats[0]);
+                    let inps = get_udo_data_type(&formats[0]);
+                    let outs = get_udo_data_type(&formats[1]);
+                    (form, inps, outs, UdoType::Legacy)
                 },
                 "udo_definition_modern" => {
                     let form = format!("opcode {} {}", key, formats.join(":"));
@@ -675,19 +677,28 @@ impl UserDefinitions {
                         .map(|s| s.trim().to_string())
                         .collect::<Vec<String>>()
                         .join("");
+
                     let out_text = formats[1].chars().filter(|c| !matches!(*c, '(' | ')')).collect();
 
                     let inps = get_udo_data_type(&inp_text);
                     let outs = get_udo_data_type(&out_text);
-                    (form, inps, outs)
+                    (form, inps, outs, UdoType::Modern)
                 },
-                _ => { ("No defition".to_string(), vec![], vec![]) }
+                _ => { ("".to_string(), vec![], vec![], UdoType::Unknown) }
             };
 
             let arg_inputs: Vec<UdoArg> = inputs.iter().enumerate().map(|(p, v)| UdoArg { position: p, arg: v.clone()}).collect();
             let arg_outputs: Vec<UdoArg> = outputs.iter().enumerate().map(|(p, v)| UdoArg { position: p, arg: v.clone()}).collect();
 
-            let udo = Udo { signature: opcode_format, inputs: arg_inputs, outputs: arg_outputs };
+            let udo = Udo {
+                node_position: (node.start_position(), node.end_position()),
+                signature: opcode_format,
+                inputs: arg_inputs,
+                outputs: arg_outputs,
+                udo_type: udo_type,
+                is_valid: true
+            };
+
             if !self.user_defined_opcodes.contains_key(key) {
                 self.user_defined_opcodes.insert(key.clone(), udo);
             } else {
@@ -795,7 +806,7 @@ fn is_valid_input_udo_types(type_identifier: &String) -> bool {
     let mut chars = trimmed.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            'a' | 'f' | 'i' | 'j' | 'k' | 'o' | 'p' | 'O' | 'P' | 'V' | 'J' | 'K' | 'S' | '0' => { },
+            'a' | 'f' | 'k' | 'o' | 'p' | 'i' | 'j' | 'O' | 'P' | 'V' | 'K' | 'S' | '0' => { },
             '[' => {
                 if chars.next() != Some(']') {
                     return false
