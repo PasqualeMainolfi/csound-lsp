@@ -585,7 +585,7 @@ impl LanguageServer for Backend {
                     "opcode_name" => {
                         if let Some(ud) = doc.user_definitions.user_defined_opcodes.get(&node_type.to_string()) {
                             let md = format!("## User-Defined Opcode\n```csound\n{}\n```", ud.signature);
-                            self.client.log_message(MessageType::INFO, format!("[INPUTS]: {:?}, [OUTPUTS]: {:?}", ud.inputs, ud.outputs)).await;
+                            // self.client.log_message(MessageType::INFO, format!("[INPUTS]: {:?}, [OUTPUTS]: {:?}", ud.inputs, ud.outputs)).await;
                             return Ok(Some(utils::hover_helper(md)))
                         }
 
