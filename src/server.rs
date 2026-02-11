@@ -417,7 +417,7 @@ impl LanguageServer for Backend {
                                 if let Some(xin_node) = xin_node {
                                     let mut arg_count = 0;
                                     for xin_child in xin_node.named_children(&mut xin_node.walk()) {
-                                        if xin_child.kind() == "type_identifier_legacy" {
+                                        if matches!(xin_child.kind(), "type_identifier_legacy" | "typed_identifier") {
                                             let vdata = parser::get_variable_data_type(xin_child, &doc.text.to_string(), &doc.user_definitions.user_defined_types);
                                             if let Some(vd) = vdata {
                                                 if arg_count < udo.inputs.len() {
@@ -568,7 +568,7 @@ impl LanguageServer for Backend {
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
-                #[cfg(debug_assertions)]
+                // #[cfg(debug_assertions)]
                 {
                     let sib = node.prev_named_sibling().map(|p| p.kind()).unwrap_or("None");
                     self.client.log_message(MessageType::INFO,
@@ -606,7 +606,7 @@ impl LanguageServer for Backend {
                             return Ok(Some(utils::hover_helper(reference.clone())))
                         } else {
                             self.client.log_message(MessageType::WARNING,
-                                format!("Manual not found for opcode {}", node_type)
+                                format!("Manual not found for opcode <{}>", node_type)
                             ).await;
                         }
                     },
@@ -763,7 +763,7 @@ impl LanguageServer for Backend {
                                     for (_, udo_file) in doc.cached_included_udo_files.iter() {
                                         for (_, value) in udo_file.user_defined_macros.iter() {
                                             let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
-                                            let documentation = format!("User Defined Macro (from {})", udo_source);
+                                            let documentation = format!("User-Defined Macro (from {})", udo_source);
                                             let compl = utils::completion_helper(
                                                 value.macro_label.clone(), CompletionItemKind::FIELD, format!("# {} #", value.macro_values), value.macro_name.clone(), documentation
                                             );

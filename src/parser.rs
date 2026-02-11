@@ -42,7 +42,8 @@ use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
 use once_cell::sync::Lazy;
 
 static SHAPE_VAR_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\]").unwrap());
-static TOKENIKE_VAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ijkaopOKVJSbfw](?:\[\])*").unwrap());
+static TOKENIZE_VAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ijkaopOKVJSbfw](?:\[\])*").unwrap());
+static TOKENIZE_VAR_LEGACY: Lazy<Regex> = Lazy::new(|| Regex::new(r"^([a-z]).*?((?:\[\])*)$").unwrap());
 
 
 pub fn get_token_lengend() -> SemanticTokensLegend {
@@ -314,7 +315,7 @@ fn get_udo_data_type(arg_list: &String) -> Vec<VariableData> {
         return vec![VariableData { data_type: VarDataType::Void, data_shape: VarDataShape::NoShape, is_array: false }]
     }
 
-    let tokens: Vec<&str> = TOKENIKE_VAR.find_iter(&trimmed).map(|c| c.as_str()).collect();
+    let tokens: Vec<&str> = TOKENIZE_VAR.find_iter(&trimmed).map(|c| c.as_str()).collect();
 
     let mut data = Vec::new();
     for t in tokens.iter() {
@@ -629,6 +630,14 @@ impl UserDefinitions {
             if let (Some(nc), Some(tc)) = (child_name, child_type) {
                 formats.push(format!("{}:{}", nc, tc));
                 completion_items.push((nc, tc));
+            } else {
+                if child.kind() == "type_identifier_legacy" {
+                    let cname = get_node_name(child, &text).unwrap_or("".to_string());
+                    let (cn_notype, ltype) = get_name_and_type_from_legacy(cname.as_str());
+                    let clean_cname = cname.chars().filter(|c| !matches!(*c, '[' | ']')).collect();
+                    formats.push(format!("{}:{}", cn_notype, ltype));
+                    completion_items.push((clean_cname, ltype));
+                }
             }
         }
 
@@ -673,7 +682,14 @@ impl UserDefinitions {
                     let inp_text: String = formats[0].chars().filter(|c| !matches!(*c, '(' | ')')).collect();
                     let inp_text = inp_text
                         .split(',')
-                        .filter_map(|i| i.split(':').last())
+                        .filter_map(|i| {
+                            if i.contains(':') {
+                                i.split(':').last().map(|s| s.to_string())
+                            } else {
+                                let (_, utype) = get_name_and_type_from_legacy(i);
+                                Some(utype)
+                            }
+                        })
                         .map(|s| s.trim().to_string())
                         .collect::<Vec<String>>()
                         .join("");
@@ -1369,7 +1385,7 @@ fn get_access_type(node: Node, text: &String, udt: &HashMap<String, UserDefinedT
             p_kind == "for_loop"                 || p_kind == "macro_define"
         { return AccessVariableType::Write; }
 
-        if current_node .kind() == "identifier" && p_kind == "argument_list" {
+        if current_node.kind() == "identifier" && p_kind == "argument_list" {
             match parent.parent() {
                 Some(gparent) => {
                     match gparent.kind() {
@@ -1793,4 +1809,19 @@ pub fn is_valid_not_defined_arg(node: &Node, text: &String, udt: &HashMap<String
         .and_then(|vdata| Some(
             (vdata.data_type == VarDataType::Opcode || vdata.data_type == VarDataType::Instr) && vdata.is_array
         )).unwrap_or(false)
+}
+
+pub fn get_name_and_type_from_legacy(var: &str) -> (String, String) {
+    let n: String = var
+        .chars()
+        .skip(1)
+        .filter(|c| !matches!(*c, '[' | ']'))
+        .collect();
+
+    let t = TOKENIZE_VAR_LEGACY
+        .captures(var)
+        .map(|c| format!("{}{}", &c[1], &c[2]))
+        .unwrap_or_default();
+
+    (n.clone(), t)
 }
