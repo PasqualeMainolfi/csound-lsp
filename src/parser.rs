@@ -741,7 +741,7 @@ pub fn is_diagnostic_cached(diag_key: &Diagnostic, cached_diagnostics: &mut Hash
 
 pub fn get_node_name<'a>(node: Node<'a>, text: &String) -> Option<String> {
     if let Ok(name) = node.utf8_text(text.as_bytes()) {
-        let clean_name = name.trim_end_matches(":");
+        let clean_name = name.trim_end_matches(":").trim();
         return Some(clean_name.to_string())
     }
     None

@@ -1,4 +1,4 @@
-use crate::parser::{UdoType, VarDataType};
+use crate::parser::{ UdoType, VarDataType };
 use crate::{
     assets, parser, resolve_pulgins, resolve_udos, utils
 };
@@ -302,6 +302,7 @@ impl LanguageServer for Backend {
                 }
             }
 
+            // self.client.log_message(MessageType::INFO, format!("[INCLUDED UDO]: {:?}", nodes_to_diagnostics.included_udo_files)).await;
             for (ufile_path, ufile) in nodes_to_diagnostics.included_udo_files.iter() {
                 let mut pflag = false;
                 if let Some(entry) = doc.cached_included_udo_files.get_mut(ufile_path) {
@@ -564,7 +565,7 @@ impl LanguageServer for Backend {
         if let Some(doc) = dc.get(&uri) {
             if let Some(node) = parser::find_node_at_position(&doc.tree, &pos) {
                 let node_kind = node.kind();
-                let node_type = doc.text.slice(node.byte_range()).to_string().trim().to_string(); // opcode key
+                let node_type = parser::get_node_name(node, &doc.text.to_string()).unwrap_or("".to_string()); // opcode key
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
@@ -574,7 +575,7 @@ impl LanguageServer for Backend {
                     self.client.log_message(MessageType::INFO,
                         format!("HOVER DEBUG: Kind='{}', Text='{}', Parent='{}', scope={:?}, sib={}",
                         node_kind,
-                        parser::get_node_name(node, &doc.text.to_string()).unwrap_or_default(),
+                        node_type,
                         node.parent().map(|p| p.kind()).unwrap_or("None"),
                         parser::find_scope(node, &doc.text.to_string(), &doc.user_definitions.user_defined_types),
                         sib
