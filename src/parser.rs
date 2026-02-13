@@ -43,7 +43,8 @@ use once_cell::sync::Lazy;
 
 static SHAPE_VAR_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\]").unwrap());
 static TOKENIZE_VAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ijkaopOKVJSbfw](?:\[\])*").unwrap());
-static TOKENIZE_VAR_LEGACY: Lazy<Regex> = Lazy::new(|| Regex::new(r"^([a-z]).*?((?:\[\])*)$").unwrap());
+// static TOKENIZE_VAR_LEGACY: Lazy<Regex> = Lazy::new(|| Regex::new(r"^([a-z]).*?((?:\[\])*)$").unwrap());
+static TOKENIZE_VAR_LEGACY: Lazy<Regex> = Lazy::new(|| Regex::new(r"^([a-z])(.*?)((?:\[\])*)$").unwrap());
 
 
 pub fn get_token_lengend() -> SemanticTokensLegend {
@@ -618,7 +619,6 @@ impl UserDefinitions {
     }
 
     pub fn add_udt<'a>(&mut self, node: Node<'a>, key: &String, text: &String) {
-        let mut cache: HashSet<String> = HashSet::new();
         let mut formats = Vec::new();
         let mut completion_items = Vec::new();
         let mut cursor = node.walk();
@@ -1812,16 +1812,8 @@ pub fn is_valid_not_defined_arg(node: &Node, text: &String, udt: &HashMap<String
 }
 
 pub fn get_name_and_type_from_legacy(var: &str) -> (String, String) {
-    let n: String = var
-        .chars()
-        .skip(1)
-        .filter(|c| !matches!(*c, '[' | ']'))
-        .collect();
-
-    let t = TOKENIZE_VAR_LEGACY
+    TOKENIZE_VAR_LEGACY
         .captures(var)
-        .map(|c| format!("{}{}", &c[1], &c[2]))
-        .unwrap_or_default();
-
-    (n.clone(), t)
+        .map(|c| (c[2].to_string(), format!("{}{}", &c[1], &c[3])))
+        .unwrap_or_default()
 }
