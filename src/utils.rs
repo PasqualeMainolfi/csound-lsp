@@ -224,11 +224,12 @@ pub fn diagnostic_helper(node: &Node, severity: DiagnosticSeverity, message: Str
     }
 }
 
-pub fn undefined_message_from_kind(nkind: &str) -> String {
-    match nkind {
-        "label_statement" => return "Undefined label".to_string(),
-        "macro_usage"     => return "Undefined macro".to_string(),
-        _                 => return "Undefined variable".to_string(),
+pub fn undefined_message_from_kind(pkind: &str) -> String {
+    match pkind {
+        "goto_statement" |
+        "rigoto_statement" => return "Undefined label".to_string(),
+        "macro_usage"      => return "Undefined macro".to_string(),
+        _                  => return "Undefined variable".to_string(),
     }
 }
 

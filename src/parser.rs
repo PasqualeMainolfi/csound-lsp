@@ -889,14 +889,14 @@ pub fn iterate_tree<'a>(
                 let parent = node.parent();
                 let should_skip = parent.map(|p| {
                     let pk = p.kind();
-                    pk == "ERROR"                       ||
-                    pk == "typed_identifier"            ||
-                    pk == "typed_opcode_name"           ||
-                    pk == "global_typed_identifier"     ||
-                    pk == "struct_definition"           ||
-                    pk == "macro_args"                  ||
-                    pk == "flag_content"                ||
-                    pk == "instrument_definition"       ||
+                    pk == "ERROR"                   ||
+                    pk == "typed_identifier"        ||
+                    pk == "typed_opcode_name"       ||
+                    pk == "global_typed_identifier" ||
+                    pk == "struct_definition"       ||
+                    pk == "macro_args"              ||
+                    pk == "flag_content"            ||
+                    pk == "instrument_definition"   ||
                     (pk == "struct_access"    && p.child_by_field_name("struct_member").map(|m| m.id() == node.id()).unwrap_or(false)) ||
                     (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))          ||
                     (pk == "opcode_statement" && p.child_by_field_name("op_macro").map(|op| op.id() == node.id()).unwrap_or(false))    ||
@@ -1344,7 +1344,6 @@ pub fn find_scope<'a>(node: Node<'a>, text: &String, udt: &HashMap<String, UserD
             }
         }
 
-
         if ckind == "score_block" || ckind == "cs_score" {
             let pflag = node.parent().map(|p| p.kind() == "macro_name").unwrap_or(false);
             if pflag { return Scope::Global } else { return Scope::Score }
@@ -1376,15 +1375,17 @@ fn get_access_type(node: Node, text: &String, udt: &HashMap<String, UserDefinedT
         if node.kind() == "identifier" {
             if p_kind == "macro_usage" { return AccessVariableType::Read; }
 
-            if p_kind == "score_nestable_loop"      || p_kind == "score_statement"       ||
-                p_kind == "score_statement_instr"   || p_kind == "score_statement_func"  ||
+            if {
+                p_kind == "score_nestable_loop"   || p_kind == "score_statement"      ||
+                p_kind == "score_statement_instr" || p_kind == "score_statement_func" ||
                 p_kind == "score_statement_wm"
-            { return AccessVariableType::Write; }
+            } { return AccessVariableType::Write; }
         }
 
-        if p_kind == "xin_statement"            || p_kind == "modern_udo_inputs"   ||
-            p_kind == "for_loop"                 || p_kind == "macro_define"
-        { return AccessVariableType::Write; }
+        if {
+            p_kind == "xin_statement" || p_kind == "modern_udo_inputs"   ||
+            p_kind == "for_loop"      || p_kind == "macro_define"
+        } { return AccessVariableType::Write; }
 
         if current_node.kind() == "identifier" && p_kind == "argument_list" {
             match parent.parent() {
@@ -1435,18 +1436,19 @@ fn get_access_type(node: Node, text: &String, udt: &HashMap<String, UserDefinedT
 
         if p_kind == "label_statement" {
             if let Some(op_node) = parent.child_by_field_name("label_name") {
-                for i in 0..parent.child_count() {
-                    let c = parent.child(i).unwrap();
-                    if c.kind() == ":" {
-                        return AccessVariableType::Read
-                    }
-                }
                 return AccessVariableType::Write
+            }
+        }
+
+        if p_kind == "goto_statement" || p_kind == "rigoto_statement" {
+            if let Some(op_node) = parent.child_by_field_name("label_name") {
+                return AccessVariableType::Read
             }
         }
 
         current_node = parent;
     }
+
     AccessVariableType::Read
 }
 
