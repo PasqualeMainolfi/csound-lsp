@@ -569,7 +569,7 @@ impl LanguageServer for Backend {
                 let opcodes = self.opcodes.read().await;
                 let plugins = self.plugins_opcodes.read().await;
 
-                #[cfg(debug_assertions)]
+                // #[cfg(debug_assertions)]
                 {
                     let sib = node.prev_named_sibling().map(|p| p.kind()).unwrap_or("None");
                     self.client.log_message(MessageType::INFO,
@@ -613,7 +613,7 @@ impl LanguageServer for Backend {
                     },
                     "identifier" => {
                         let is_type = node.parent()
-                            .map(|p| p.kind() == "typed_identifier" || p.kind() == "type_identifier")
+                            .map(|p| p.kind() == "typed_identifier" || p.kind() == "type_identifier" || p.kind() == "typed_opcode_name")
                             .unwrap_or(false);
 
                         if is_type {

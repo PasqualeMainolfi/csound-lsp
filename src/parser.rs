@@ -747,7 +747,7 @@ pub fn get_node_name<'a>(node: Node<'a>, text: &String) -> Option<String> {
     None
 }
 
-fn check_opcode<'a>(node: Node<'a>) -> Option<OpcodeCheck> {
+fn check_opcode<'a>(node: Node<'a>) -> Option<OpcodeCheck> { // add opcode_typed_name
     let nkind = node.kind();
     if nkind != "opcode_name" { return None; }
 
@@ -861,7 +861,7 @@ pub fn iterate_tree<'a>(
 
         match node.kind() {
             // check types
-            "typed_identifier" => {
+            "typed_identifier" | "typed_opcode_name" => {
                 if let Some(p) = node.parent() {
                     if let Some(node_explicit_type) = node.child_by_field_name("type") {
                         let node_name = node.child_by_field_name("name").unwrap();
@@ -891,6 +891,7 @@ pub fn iterate_tree<'a>(
                     let pk = p.kind();
                     pk == "ERROR"                       ||
                     pk == "typed_identifier"            ||
+                    pk == "typed_opcode_name"           ||
                     pk == "global_typed_identifier"     ||
                     pk == "struct_definition"           ||
                     pk == "macro_args"                  ||
