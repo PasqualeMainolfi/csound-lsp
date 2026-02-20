@@ -897,6 +897,8 @@ pub fn iterate_tree<'a>(
                     pk == "macro_args"              ||
                     pk == "flag_content"            ||
                     pk == "instrument_definition"   ||
+                    pk == "cabbage_statement"       ||
+                    pk == "cabbage_property"        ||
                     (pk == "struct_access"    && p.child_by_field_name("struct_member").map(|m| m.id() == node.id()).unwrap_or(false)) ||
                     (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))          ||
                     (pk == "opcode_statement" && p.child_by_field_name("op_macro").map(|op| op.id() == node.id()).unwrap_or(false))    ||
@@ -1373,7 +1375,7 @@ fn get_access_type(node: Node, text: &String, udt: &HashMap<String, UserDefinedT
         let p_kind = parent.kind();
 
         if node.kind() == "identifier" {
-            if p_kind == "macro_usage" { return AccessVariableType::Read; }
+            if p_kind == "macro_usage" || p_kind == "array_access" { return AccessVariableType::Read; }
 
             if {
                 p_kind == "score_nestable_loop"   || p_kind == "score_statement"      ||
@@ -1421,6 +1423,14 @@ fn get_access_type(node: Node, text: &String, udt: &HashMap<String, UserDefinedT
                 }
             }
             return AccessVariableType::Read;
+        }
+
+        if current_node.kind() == "identifier" {
+            if let Some(out_node) = parent.child_by_field_name("outputs") {
+                if out_node.kind() == "identifier" && out_node.id() == current_node.id() {
+                    return AccessVariableType::Read;
+                }
+            }
         }
 
         if p_kind == "opcode_statement" {
