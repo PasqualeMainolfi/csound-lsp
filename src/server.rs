@@ -720,7 +720,7 @@ impl LanguageServer for Backend {
                             }
 
                             match wnode.kind() {
-                                ":" => {
+                                ":" | "label_statement" => {
                                     let mut v = HashSet::new();
                                     let types = vec![
                                         "a", "i", "k", "b", "S", "f", "w",
