@@ -539,6 +539,10 @@ impl LanguageServer for Backend {
                         expand_error = Some(doc.text.to_string());
                         "Unclosed udo block".to_string()
                     },
+                    parser::GErrors::CabbageBlockError=> {
+                        expand_error = Some(doc.text.to_string());
+                        "It is not possible to have a Cabbage and a Cabbage ARA block in the same .csd file".to_string()
+                    },
                     _ => { todo!() }
                 };
 

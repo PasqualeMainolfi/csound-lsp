@@ -144,7 +144,8 @@ pub enum GErrors {
     InstrBlockSyntaxError,
     UdoBlockSyntaxError,
     UdoInputParamsError,
-    UdoOutputsParamsError
+    UdoOutputsParamsError,
+    CabbageBlockError
 }
 
 #[derive(Debug)]
@@ -844,6 +845,8 @@ pub fn iterate_tree<'a>(
     let root_node = tree.root_node().walk();
     let mut to_visit = vec![root_node.node()];
     let mut nodes_to_diagnostics = NodeCollects::new();
+    let mut flag_cabbage_start = 0;
+    let mut flag_cabbage_ara_start = 0;
 
     while let Some(node) = to_visit.pop() {
         // check opcodes
@@ -897,8 +900,6 @@ pub fn iterate_tree<'a>(
                     pk == "macro_args"              ||
                     pk == "flag_content"            ||
                     pk == "instrument_definition"   ||
-                    pk == "cabbage_statement"       ||
-                    pk == "cabbage_property"        ||
                     (pk == "struct_access"    && p.child_by_field_name("struct_member").map(|m| m.id() == node.id()).unwrap_or(false)) ||
                     (pk == "opcode_statement" && p.child_by_field_name("op").map(|op| op.id() == node.id()).unwrap_or(false))          ||
                     (pk == "opcode_statement" && p.child_by_field_name("op_macro").map(|op| op.id() == node.id()).unwrap_or(false))    ||
@@ -1022,7 +1023,6 @@ pub fn iterate_tree<'a>(
                             false
                         }
                     };
-
                     if !is_valid {
                         nodes_to_diagnostics.generic_errors.push(GenericError {
                             node: node,
@@ -1199,6 +1199,20 @@ pub fn iterate_tree<'a>(
                             nodes_to_diagnostics.flags.insert(flag.trim().to_string(), child);
                         }
                     }
+                }
+            }
+            "tag_cabbage_start" | "tag_cabbageara_start" => {
+                if node.kind() == "tag_cabbage_start" {
+                    flag_cabbage_start = 1;
+                } else {
+                    flag_cabbage_ara_start = 1
+                }
+
+                if flag_cabbage_ara_start == 1 && flag_cabbage_start == 1 {
+                    nodes_to_diagnostics.generic_errors.push(GenericError {
+                        node,
+                        error_type: GErrors::CabbageBlockError
+                    });
                 }
             }
             // check ERROR node
