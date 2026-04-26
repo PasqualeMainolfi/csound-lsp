@@ -263,7 +263,7 @@ impl LanguageServer for Backend {
 
             // add external udo to cs_references
             if !resolve_udos::add_included_udos_to_cs_references(&doc.cached_included_udo_files, &mut jr) {
-                self.client.log_message(MessageType::WARNING, "[WARNING] Included User-Defined opcodes: internal opcodes cache corrupted!").await;
+                self.client.log_message(MessageType::WARNING, "[WARNING] Included User-Defined opcodes: external opcodes cache corrupted").await;
             }
 
             // add local udo to cs_references

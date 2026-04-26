@@ -83,12 +83,19 @@ pub async fn load_manual_resources(
         let dir_name = format!("csound_manual-html_{}", &release_tag);
         manual_dir_path = manual_dir_path.join(&dir_name);
 
-        if !manual_dir_path.exists() {
-            if temp_dir.exists() {
-                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        let version_file = manual_dir_path.join(".version");
+        let check_index = manual_dir_path.join("index.html");
+        let download = if version_file.exists() {
+            let saved = tokio::fs::read_to_string(&version_file).await?;
+            saved != release_tag || !check_index.exists()
+        } else { true };
+
+        if download {
+            if manual_dir_path.exists() {
+                tokio::fs::remove_dir_all(&manual_dir_path).await?;
             }
 
-            let _ = tokio::fs::create_dir_all(&temp_dir).await;
+            tokio::fs::create_dir_all(&temp_dir).await?;
 
             let download_url = format!("{}/{}/{}", GITHUB_DOWNLOAD_BASE_MANUAL, release_tag, ASSET_NAME);
             let local_file = temp_dir.join(format!("csound_manual-html_{}.zip", release_tag));
@@ -98,9 +105,11 @@ pub async fn load_manual_resources(
             let zip_archive_path = temp_dir.join(zip_name);
             let target_dir = manual_dir_path.clone();
 
-            if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
+            std::fs::create_dir_all(&target_dir)?;
             utils::unzip_file(&zip_archive_path, &target_dir)?;
+            tokio::fs::write(&version_file, release_tag).await?;
         }
+
     }
 
     if is_v_error {
