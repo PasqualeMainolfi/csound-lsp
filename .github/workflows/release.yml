@@ -54,6 +54,6 @@ jobs:
           fi
 
       - name: Upload asset
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v4
         with:
           files: ${{ matrix.name }}
