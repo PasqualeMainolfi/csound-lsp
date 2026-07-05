@@ -836,6 +836,32 @@ fn is_valid_input_udo_types(type_identifier: &String) -> bool {
     true
 }
 
+fn valid_modern_udo_signature_type<'a>(type_identifier: &String, type_node: Node<'a>) -> bool {
+    match type_node.parent().map(|p| p.kind()) {
+        Some("modern_udo_inputs") => is_valid_input_udo_types(type_identifier),
+        Some("modern_udo_outputs") => {
+            type_node
+                .parent()
+                .map(|p| is_valid_output_udo_types(type_identifier, p))
+                .unwrap_or(false)
+        },
+        Some("typed_identifier") | Some("typed_opcode_name") => {
+            match type_node.parent().and_then(|p| p.parent()).map(|p| p.kind()) {
+                Some("modern_udo_inputs") => is_valid_input_udo_types(type_identifier),
+                Some("modern_udo_outputs") => {
+                    type_node
+                        .parent()
+                        .and_then(|p| p.parent())
+                        .map(|p| is_valid_output_udo_types(type_identifier, p))
+                        .unwrap_or(false)
+                },
+                _ => false
+            }
+        },
+        _ => false
+    }
+}
+
 pub fn iterate_tree<'a>(
     tree: &'a Tree,
     text: &String,
@@ -868,12 +894,13 @@ pub fn iterate_tree<'a>(
                 if let Some(p) = node.parent() {
                     if let Some(node_explicit_type) = node.child_by_field_name("type") {
                         let node_name = node.child_by_field_name("name").unwrap();
-                        if node_explicit_type.kind() == "identifier" {
-                            nodes_to_diagnostics.types.push(node_explicit_type);
-                        }
 
                         let name = get_node_name(node_name, &text).unwrap();
                         let ty = get_node_name(node_explicit_type, &text).unwrap();
+                        if node_explicit_type.kind() == "identifier" && !valid_modern_udo_signature_type(&ty, node_explicit_type) {
+                            nodes_to_diagnostics.types.push(node_explicit_type);
+                        }
+
                         if let Some(n) = nodes_to_diagnostics.typed_vars.get_mut(&name) {
                             *n = ty
                         } else {
@@ -1843,4 +1870,44 @@ pub fn get_name_and_type_from_legacy(var: &str) -> (String, String) {
         .captures(var)
         .map(|c| (c[2].to_string(), format!("{}{}", &c[1], &c[3])))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modern_udo_input_type_accepts_csound_signature_chars() {
+        for ty in ["a", "f", "k", "o", "p", "i", "j", "O", "P", "V", "K", "S", "0", "k[]", "o[]"] {
+            assert!(is_valid_input_udo_types(&ty.to_string()), "{ty} should be a valid modern UDO input type");
+        }
+
+        for ty in ["b", "w", "z", "oo[", "o[1]"] {
+            assert!(!is_valid_input_udo_types(&ty.to_string()), "{ty} should not be a valid modern UDO input type");
+        }
+    }
+
+    #[test]
+    fn modern_udo_input_type_is_not_checked_as_regular_type() {
+        let text = "opcode osc_bank(amp:k[], freq:k[], dim:i, cnt:o):(a)\nendop\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+
+        assert!(
+            !nodes.types.iter().any(|node| get_node_name(*node, &text).as_deref() == Some("o")),
+            "modern UDO input type 'o' should not be sent through regular type diagnostics"
+        );
+    }
+
+    #[test]
+    fn invalid_modern_udo_input_type_is_checked_as_regular_type() {
+        let text = "opcode bad_input(cnt:z):(a)\nendop\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+
+        assert!(
+            nodes.types.iter().any(|node| get_node_name(*node, &text).as_deref() == Some("z")),
+            "invalid modern UDO input type should still be sent through regular type diagnostics"
+        );
+    }
 }
