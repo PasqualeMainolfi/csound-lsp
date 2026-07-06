@@ -106,6 +106,66 @@ pub struct GitHubEntry {
     pub download_url: Option<String>
 }
 
+pub enum PVersionAge {
+    Oldest,
+    Newest,
+    Same
+}
+
+#[derive(Debug)]
+pub struct PVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32
+}
+
+impl PVersion {
+    pub fn new(string_version: &str) -> Self {
+        let mut parts = string_version.trim_start_matches('v').split('.');
+        let major = Self::parse_component(parts.next());
+        let minor = Self::parse_component(parts.next());
+        let patch = Self::parse_component(parts.next());
+
+        Self { major, minor, patch }
+    }
+
+    fn parse_component(component: Option<&str>) -> u32 {
+        component
+            .map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0)
+    }
+
+    pub fn compare(&self, version: &PVersion) -> PVersionAge {
+        if self.major != version.major {
+            return if self.major < version.major {
+                PVersionAge::Oldest
+            } else {
+                PVersionAge::Newest
+            };
+        }
+
+        if self.minor != version.minor {
+            return if self.minor < version.minor {
+                PVersionAge::Oldest
+            } else {
+                PVersionAge::Newest
+            };
+        }
+
+        if self.patch != version.patch {
+            return if self.patch < version.patch {
+                PVersionAge::Oldest
+            } else {
+                PVersionAge::Newest
+            };
+        }
+
+        PVersionAge::Same
+    }
+}
+
+
 pub fn parse_plugins_git_url(url: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
     let trimmed = url.trim_end_matches(".git").trim_end_matches('/');
     let splitted: Vec<&str> = trimmed.split('/').collect();

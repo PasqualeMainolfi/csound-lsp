@@ -193,9 +193,7 @@ impl LanguageServer for Backend {
                 let p_installed = plugs.iter().cloned().collect::<Vec<String>>().join(", ");
                 self.client.log_message(MessageType::INFO, format!("[INFO] Installed plugins: {}", p_installed)).await;
                 if !plugs.is_empty() {
-                    if let Err(e) = resolve_pulgins::load_plugins_resources(
-                        &mut global_temp, &plugs, &mut plugins_opcodes
-                    ).await {
+                    if let Err(e) = resolve_pulgins::load_plugins_resources(&mut global_temp, &plugs, &mut plugins_opcodes).await {
                         self.client.log_message(MessageType::WARNING, format!("[WARNING] Impossible to load plugins: {}", e)).await;
                     } else {
                         let keys = &plugins_opcodes.keys().cloned().collect::<Vec<String>>().join(", ");
