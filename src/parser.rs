@@ -1469,7 +1469,7 @@ fn get_access_type(node: Node, text: &String, udt: &HashMap<String, UserDefinedT
         if current_node.kind() == "identifier" {
             if let Some(out_node) = parent.child_by_field_name("outputs") {
                 if out_node.kind() == "identifier" && out_node.id() == current_node.id() {
-                    return AccessVariableType::Read;
+                    return AccessVariableType::Write;
                 }
             }
         }
@@ -1908,6 +1908,26 @@ mod tests {
         assert!(
             nodes.types.iter().any(|node| get_node_name(*node, &text).as_deref() == Some("z")),
             "invalid modern UDO input type should still be sent through regular type diagnostics"
+        );
+    }
+
+    #[test]
+    fn opcode_output_identifier_is_a_definition() {
+        let text = "instr 1\nReset:\n    writePointer init 0\n    readPointer init 0\nendin\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+
+        assert!(
+            !nodes.user_definitions.undefined_vars.iter().any(|var| var.var_name == "readPointer"),
+            "readPointer output should be a definition, not an undefined read"
+        );
+        assert!(
+            nodes.user_definitions.unused_vars.iter().any(|var| var.var_name == "readPointer"),
+            "readPointer output should be tracked as an unused definition until it is read"
+        );
+        assert!(
+            nodes.user_definitions.unused_vars.iter().any(|var| var.var_name == "writePointer"),
+            "legacy-typed writePointer output should keep the existing unused-definition behavior"
         );
     }
 }

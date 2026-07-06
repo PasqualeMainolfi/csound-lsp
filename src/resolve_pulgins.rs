@@ -1,17 +1,38 @@
+#![allow(unused)]
+
 use crate::{
-    assets::{self, OpcodesData},
-    utils
+    assets::{ self, OpcodesData },
+    utils::{ GitHubEntry, parse_plugins_git_url }
 };
 use std::{
-    collections::{ HashMap, HashSet }, env, path::{ Path, PathBuf }, process
+    collections::{ HashMap, HashSet },
+    path::{ Path, PathBuf },
+    time::Duration,
+    env,
+    process
 };
+
 use serde::Deserialize;
 use regex::Regex;
 
-const TEMP_CSOUND_PLUGINS_DIR: &str = "temp_csound_plugins";
-pub const GITHUB_LATEST_API_PLUGINS: &str = "https://api.github.com/repos/csound-plugins/csound-plugins/releases/latest";
-pub const GITHUB_DOWNLOAD_BASE_PLUGINS: &str = "https://github.com/csound-plugins/csound-plugins/archive/refs/tags";
 
+// read risset index to capture opcode docs
+pub const GITHUB_RISSET_PLUGINS_INDEX: &str = "https://raw.githubusercontent.com/csound-plugins/risset-data/master/rissetindex.json"; // for raw download
+
+
+const TEMP_CSOUND_PLUGINS_DIR: &str = "temp_csound_plugins";
+
+#[derive(Deserialize)]
+struct RissetIndex {
+    version: String,
+    plugins: HashMap<String, RPlugin>
+}
+
+#[derive(Debug, Deserialize)]
+struct RPlugin {
+    url: String,
+    path: Option<String>
+}
 
 #[derive(Debug)]
 pub struct CsoundPlugin {
@@ -185,96 +206,78 @@ pub async fn find_installed_plugins() -> Result<HashSet<String>, Box<dyn std::er
     return Ok(plugins)
 }
 
-pub async fn load_plugins_resources(
-    global_temp: &mut Path, installed_plugins: &HashSet<String>, plugin_opcodes: &mut HashMap<String, CsoundPlugin>
-) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
+
+pub async fn load_plugins_resources(global_temp: &mut Path, installed_plugins: &HashSet<String>, plugin_opcodes: &mut HashMap<String, CsoundPlugin>) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
     let temp_dir = global_temp.join(TEMP_CSOUND_PLUGINS_DIR);
 
-    let check_release_tag = utils::get_release_tag_from_github(GITHUB_LATEST_API_PLUGINS).await;
-    let release_tag = match check_release_tag {
-        Ok(tag) => tag,
-        Err(_) => "v-error".to_string() // verify prec version
-    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent("csound-lsp")
+        .build()?;
 
-    let mut is_v_error = true;
-    let mut plugins_dir_path = temp_dir.clone();
+    let pjson: RissetIndex = client
+        .get(GITHUB_RISSET_PLUGINS_INDEX)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
 
-    if release_tag != "v-error" {
-        is_v_error = false;
-
-        let dir_name = format!("csound-plugins_{}", &release_tag);
-        plugins_dir_path = plugins_dir_path.join(&dir_name);
-
-        if !plugins_dir_path.exists() {
-            if temp_dir.exists() {
-                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            }
-
-            let _ = tokio::fs::create_dir_all(&temp_dir).await;
-
-            let download_url = format!("{}/{}.zip", GITHUB_DOWNLOAD_BASE_PLUGINS, release_tag);
-            let local_file = temp_dir.join(format!("csound-plugins_{}.zip", release_tag));
-            utils::download_from_github(&download_url, &temp_dir, &local_file).await?;
-
-            let zip_name = format!("csound-plugins_{}.zip", release_tag);
-            let zip_archive_path = temp_dir.join(zip_name);
-            let target_dir = plugins_dir_path.clone();
-
-            if !target_dir.exists() { std::fs::create_dir_all(&target_dir)?; }
-            utils::unzip_file(&zip_archive_path, &target_dir)?;
-
-            let mut entries = tokio::fs::read_dir(&plugins_dir_path).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let epath = entry.path();
-                if epath.is_dir() {
-                    if let Some(fname) = epath.file_name().and_then(|n| n.to_str()) {
-                        if fname.starts_with("csound-plugins-") {
-                            utils::copy_dir_recursively(&epath, &plugins_dir_path).await?;
-                            tokio::fs::remove_dir_all(&epath).await?;
-                        }
-                    }
-                }
-            }
-        }
+    if temp_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 
-    if is_v_error  {
-        plugins_dir_path = utils::check_valid_resource_dir(&temp_dir, "csound-plugins_")?;
-    }
-
-    let docs_path = plugins_dir_path.join("docs");
-    let op_path = docs_path.join("opcodes");
-    let src_path = plugins_dir_path.join("src");
-
-    if op_path.exists() && src_path.exists() {
-        let plug_opcodes = load_plugins_opcodes(&src_path, &op_path, &installed_plugins)?;
-        *plugin_opcodes = plug_opcodes;
-    } else {
-        return Err(format!("Plugins dir path not founded {:?}", plugins_dir_path).into());
-    }
-
-    Ok(())
-}
-
-fn load_plugins_opcodes(src_path: &Path, opcodes_path: &Path, installed_plugins: &HashSet<String>) -> std::io::Result<HashMap<String, CsoundPlugin>> {
-    let mut map = HashMap::new();
+    tokio::fs::create_dir_all(&temp_dir).await?;
 
     let re_csound = Regex::new(r"```[ \t]*csound[^\n]*").unwrap();
     let re_n = Regex::new(r"[ \t]*(```\n)").unwrap();
     let re_bs = Regex::new(r"<br\s*/?>").unwrap();
 
-    for entry in std::fs::read_dir(&src_path)? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue
+    let mut map = HashMap::new();
+
+    for (plugin_name, pvalue) in &pjson.plugins {
+        let (owner, repo) = match parse_plugins_git_url(&pvalue.url) {
+            Ok((o, r)) => (o, r),
+            Err(_) => continue,
         };
 
-        let epath = entry.path();
+        let src_path = pvalue.path.as_ref().map(PathBuf::from).unwrap_or_default();
+        let remote_plugin_path = src_path.to_string_lossy();
 
-        if !epath.is_dir() || !epath.join("risset.json").exists() { continue; }
+        let manifest_api_url = if remote_plugin_path.is_empty() {
+            format!(
+                "https://api.github.com/repos/{}/{}/contents/risset.json",
+                owner, repo
+            )
+        } else {
+            format!(
+                "https://api.github.com/repos/{}/{}/contents/{}/risset.json",
+                owner, repo, remote_plugin_path
+            )
+        };
 
-        let manifest_file = epath.join("risset.json");
-        let fname = epath.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        let manifest_entry: GitHubEntry = match client.get(manifest_api_url).send().await {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(resp) => resp.json().await?,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
+
+        let Some(manifest_download_url) = manifest_entry.download_url else { continue; };
+
+        let manifest_bytes = match client.get(manifest_download_url).send().await {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(resp) => resp.bytes().await?,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
+
+        let opcodes = match serde_json::from_slice::<CsoundPluginOpcodes>(&manifest_bytes) {
+            Ok(ops) => ops.opcodes,
+            Err(_) => continue,
+        };
 
         let libplugin = installed_plugins
             .iter()
@@ -286,47 +289,95 @@ fn load_plugins_opcodes(src_path: &Path, opcodes_path: &Path, installed_plugins:
                     .unwrap_or(lib);
 
                 let pname = pname.strip_prefix("lib").unwrap_or(pname);
+
                 (lib, pname)
             })
-            .find(|lib| {
-                lib.1 == fname
-            });
+            .find(|(_, pname)| *pname == plugin_name);
 
-        let Some((libname, _)) = libplugin else { continue };
-
-        let m = match std::fs::read_to_string(&manifest_file) {
-            Ok(readed) => readed,
-            Err(_) => continue
+        let Some((libname, _)) = libplugin else {
+            continue;
         };
 
-        let popcodes = match serde_json::from_str::<CsoundPluginOpcodes>(&m) {
-            Ok(ops) => ops.opcodes,
-            Err(_) => continue
+        let local_plugin_doc_dir = temp_dir.join(plugin_name).join("doc");
+        tokio::fs::create_dir_all(&local_plugin_doc_dir).await?;
+
+        let doc_api_url = if remote_plugin_path.is_empty() {
+            format!(
+                "https://api.github.com/repos/{}/{}/contents/doc",
+                owner, repo
+            )
+        } else {
+            format!(
+                "https://api.github.com/repos/{}/{}/contents/{}/doc",
+                owner, repo, remote_plugin_path
+            )
         };
 
-        for opcode in popcodes.iter() {
-            if !map.contains_key(opcode) {
-                let doc_path = opcodes_path.join(format!("{}.md", opcode));
-                let doc = std::fs::read_to_string(&doc_path).ok();
+        let gh_entries: Vec<GitHubEntry> = match client.get(doc_api_url).send().await {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(resp) => resp.json().await?,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
 
-                let pdoc = match doc {
-                    Some(content_file) => {
-                        let content = re_csound.replace_all(&content_file, "\n```csound\n").to_string();
-                        let content = re_n.replace_all(&content, "\n```\n").to_string();
-                        let content = re_bs.replace_all(&content, "\n\n").to_string();
-                        content
-                    },
-                    None => String::from("")
-                };
+        for entry in gh_entries {
+            if entry.kind != "file" { continue; }
 
-                map.insert(
-                    opcode.clone(),
-                    CsoundPlugin { libname: libname.clone(), documentation: pdoc }
-                );
-            }
+            let is_md = Path::new(&entry.name)
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+
+            if !is_md { continue; }
+            let Some(download_url) = entry.download_url else { continue; };
+
+            let fbytes = match client.get(download_url).send().await {
+                Ok(resp) => match resp.error_for_status() {
+                    Ok(resp) => resp.bytes().await?,
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+
+            tokio::fs::write(local_plugin_doc_dir.join(&entry.name), &fbytes).await?;
+        }
+
+        for opcode in opcodes {
+            if map.contains_key(&opcode) { continue; }
+
+            let doc_path = local_plugin_doc_dir.join(format!("{}.md", opcode));
+
+            let documentation = match tokio::fs::read_to_string(&doc_path).await {
+                Ok(content_file) => {
+                    let content = re_csound
+                        .replace_all(&content_file, "\n```csound\n")
+                        .to_string();
+
+                    let content = re_n
+                        .replace_all(&content, "\n```\n")
+                        .to_string();
+
+                    re_bs
+                        .replace_all(&content, "\n\n")
+                        .to_string()
+                }
+                Err(_) => String::new(),
+            };
+
+            map.insert(
+                opcode,
+                CsoundPlugin {
+                    libname: libname.clone(),
+                    documentation,
+                },
+            );
         }
     }
-    Ok(map)
+
+    *plugin_opcodes = map;
+
+    Ok(())
 }
 
 pub async fn add_plugins_to_cs_references(plugins: &HashMap<String, CsoundPlugin>, cs_references: &mut assets::CsoundJsonData) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

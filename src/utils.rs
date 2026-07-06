@@ -1,7 +1,8 @@
+#![allow(unused)]
 use crate::parser;
-use std::time::Duration;
 use std::path::{Path, PathBuf};
 use std::io;
+use reqwest::Client;
 use tower_lsp::lsp_types::{
     CompletionItem,
     CompletionItemKind,
@@ -96,12 +97,24 @@ pub struct ReleaseTag {
     tag_name: String
 }
 
-pub async fn get_release_tag_from_github(github_api_latest: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .user_agent("csound-lsp")
-        .build()?;
+#[derive(Debug, Deserialize)]
+pub struct GitHubEntry {
+    pub name: String,
+    pub path: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub download_url: Option<String>
+}
 
+pub fn parse_plugins_git_url(url: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let trimmed = url.trim_end_matches(".git").trim_end_matches('/');
+    let splitted: Vec<&str> = trimmed.split('/').collect();
+    let owner = splitted.get(splitted.len() - 2).ok_or("missing owner in git url")?.to_string();
+    let repos = splitted.last().ok_or("missing repos in git url")?.to_string();
+    Ok((owner, repos))
+}
+
+pub async fn get_release_tag_from_github(client: &Client, github_api_latest: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let release: ReleaseTag = client
         .get(github_api_latest)
         .send()
@@ -135,25 +148,6 @@ pub fn unzip_file(zip_archive_path: &Path, dir_name: &Path) -> io::Result<()> {
     std::fs::remove_file(&zip_archive_path)?;
 
     Ok(())
-}
-
-pub async fn copy_dir_recursively(src: &Path, dest: &Path) -> std::io::Result<()> {
-    if !dest.exists() {
-        tokio::fs::create_dir_all(&dest).await?;
-    }
-
-    let mut entries = tokio::fs::read_dir(&src).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let epath = entry.path();
-        let dest_path = dest.join(&entry.file_name());
-        if epath.is_dir() {
-            Box::pin(copy_dir_recursively(&epath, &dest_path)).await?;
-        } else {
-            tokio::fs::copy(&epath, &dest_path).await?;
-        }
-    }
-
-   Ok(())
 }
 
 pub fn check_valid_resource_dir(dir: &Path, label: &str) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {

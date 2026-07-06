@@ -1,9 +1,12 @@
 use crate::utils;
 
-use std::path::{ Path, PathBuf };
 use regex::{ Regex, Captures };
-use std::collections::HashMap;
 use serde::Deserialize;
+use std::{
+    path::{ Path, PathBuf},
+    collections::HashMap,
+    time::Duration
+};
 
 
 pub const TEMP_CSOUND_MANUAL_DIR: &str = "temp_csound_manual";
@@ -69,7 +72,12 @@ pub async fn load_manual_resources(
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
     let temp_dir = global_temp.join(TEMP_CSOUND_MANUAL_DIR);
 
-    let check_release_tag = utils::get_release_tag_from_github(GITHUB_LATEST_API_MANUAL).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent("csound-lsp")
+        .build()?;
+
+    let check_release_tag = utils::get_release_tag_from_github(&client, GITHUB_LATEST_API_MANUAL).await;
     let release_tag = match check_release_tag {
         Ok(tag) => tag,
         Err(_) => "v-error".to_string() // verify prec version
