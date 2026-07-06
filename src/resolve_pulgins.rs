@@ -262,6 +262,9 @@ pub async fn load_plugins_resources(
 
         let src_path = pvalue.path.as_ref().map(PathBuf::from).unwrap_or_default();
         let remote_plugin_path = src_path.to_string_lossy();
+        let local_plugin_dir = temp_dir.join(plugin_name);
+        let local_plugin_doc_dir = local_plugin_dir.join("doc");
+        let local_plugin_data_man = local_plugin_dir.join("data.json");
 
         let manifest_api_url = if remote_plugin_path.is_empty() {
             format!(
@@ -275,36 +278,47 @@ pub async fn load_plugins_resources(
             )
         };
 
-        let manifest_entry: GitHubEntry = match client.get(manifest_api_url).send().await {
+        let remote_opcodes_man = match client.get(manifest_api_url).send().await {
             Ok(resp) => match resp.error_for_status() {
-                Ok(resp) => resp.json().await?,
-                Err(_) => continue,
+                Ok(resp) => match resp.json::<GitHubEntry>().await {
+                    Ok(manifest_entry) => {
+                        if let Some(manifest_download_url) = manifest_entry.download_url {
+                            match client.get(manifest_download_url).send().await {
+                                Ok(resp) => match resp.error_for_status() {
+                                    Ok(resp) => match resp.bytes().await {
+                                        Ok(manifest_bytes) => serde_json::from_slice::<CsoundPluginOpcodes>(&manifest_bytes).ok(),
+                                        Err(_) => None,
+                                    },
+                                    Err(_) => None,
+                                },
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
+                        }
+                    },
+                    Err(_) => None,
+                },
+                Err(_) => None,
             },
-            Err(_) => continue,
+            Err(_) => None,
         };
 
-        let Some(manifest_download_url) = manifest_entry.download_url else { continue; };
-
-        let manifest_bytes = match client.get(manifest_download_url).send().await {
-            Ok(resp) => match resp.error_for_status() {
-                Ok(resp) => resp.bytes().await?,
+        let opcodes_man = match remote_opcodes_man {
+            Some(m) => m,
+            None => match tokio::fs::read_to_string(&local_plugin_data_man).await {
+                Ok(f) => match serde_json::from_str::<CsoundPluginOpcodes>(&f) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                },
                 Err(_) => continue,
-            },
-            Err(_) => continue,
-        };
-
-        let opcodes_man = match serde_json::from_slice::<CsoundPluginOpcodes>(&manifest_bytes) {
-            Ok(m) => m,
-            Err(_) => continue,
+            }
         };
 
         let version: PVersion = PVersion::new(&opcodes_man.version);
         let opcodes = &opcodes_man.opcodes;
 
-        let local_plugin_dir = temp_dir.join(plugin_name);
-        let local_plugin_doc_dir = local_plugin_dir.join("doc");
-        let local_plugin_data_man = local_plugin_dir.join("data.json");
-        tokio::fs::create_dir_all(&local_plugin_doc_dir).await?;
+        tokio::fs::create_dir_all(&local_plugin_dir).await?;
 
         let mut should_download_docs = true;
         if local_plugin_data_man.exists() && local_plugin_data_man.is_file() {
@@ -313,7 +327,10 @@ pub async fn load_plugins_resources(
                     let local_version = PVersion::new(&local_pdata.version);
                     match local_version.compare(&version) {
                         PVersionAge::Newest | PVersionAge::Same => {
-                            if local_pdata.opcodes == *opcodes && local_plugin_doc_dir.exists() {
+                            let docs_are_cached = opcodes.iter().all(|opcode| {
+                                local_plugin_doc_dir.join(format!("{}.md", opcode)).is_file()
+                            });
+                            if local_pdata.opcodes == *opcodes && docs_are_cached {
                                 should_download_docs = false;
                             }
                         },
@@ -339,15 +356,17 @@ pub async fn load_plugins_resources(
             let gh_entries: Vec<GitHubEntry> = match client.get(doc_api_url).send().await {
                 Ok(resp) => match resp.error_for_status() {
                     Ok(resp) => resp.json().await?,
-                    Err(_) => continue,
+                    Err(_) => Vec::new(),
                 },
-                Err(_) => continue,
+                Err(_) => Vec::new(),
             };
 
-            if local_plugin_doc_dir.exists() {
-                let _ = tokio::fs::remove_dir_all(&local_plugin_doc_dir).await;
+            if !gh_entries.is_empty() {
+                if local_plugin_doc_dir.exists() {
+                    let _ = tokio::fs::remove_dir_all(&local_plugin_doc_dir).await;
+                }
+                tokio::fs::create_dir_all(&local_plugin_doc_dir).await?;
             }
-            tokio::fs::create_dir_all(&local_plugin_doc_dir).await?;
 
             for entry in gh_entries {
                 if entry.kind != "file" { continue; }
