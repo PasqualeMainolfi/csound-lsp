@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Update tree-sitter-csound dependency
         run: cargo update -p tree-sitter-csound
@@ -54,6 +54,6 @@ jobs:
           fi
 
       - name: Upload asset
-        uses: softprops/action-gh-release@v4
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ matrix.name }}
