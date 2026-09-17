@@ -113,8 +113,12 @@ pub fn parse_doc(text: &str, old_tree: Option<&Tree>) -> ParsedTree {
     let mut p = Parser::new();
     let language = LANGUAGE.into();
     p.set_language(&language).unwrap();
+    parse_with(&mut p, text, old_tree)
+}
 
-    let tree = p.parse(text, old_tree).unwrap();
+// parser must be set to the csound language
+pub fn parse_with(parser: &mut Parser, text: &str, old_tree: Option<&Tree>) -> ParsedTree {
+    let tree = parser.parse(text, old_tree).expect("csound parser without language");
     let tree_type = get_doc_type(tree.root_node());
 
     ParsedTree {
@@ -145,7 +149,8 @@ pub enum GErrors {
     UdoBlockSyntaxError,
     UdoInputParamsError,
     UdoOutputsParamsError,
-    CabbageBlockError
+    CabbageBlockError,
+    Missing
 }
 
 #[derive(Debug)]
@@ -181,11 +186,6 @@ impl<'a> NodeCollects<'a> {
             flags: HashMap::new()
         }
     }
-}
-
-enum OpcodeCheck {
-    Opcode,
-    Udo
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -442,6 +442,7 @@ pub fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, 
 #[derive(Debug, Clone)]
 pub struct UserDefinedVariable {
     pub node_location: usize,
+    pub definition_location: Option<usize>, // first write, used to offer the variable only after it
     pub var_name: String,
     pub var_scope: Scope,
     pub var_calls: usize,
@@ -492,8 +493,7 @@ impl UserDefinitions {
 
         let check = if let Some(var) = map.get_mut(k) {
             var.var_calls += 1;
-            let p = node.parent().unwrap();
-            let pkind = p.kind();
+            let pkind = node.parent().map(|p| p.kind()).unwrap_or("");
 
             match acc {
                 AccessVariableType::Read => {
@@ -504,16 +504,19 @@ impl UserDefinitions {
                     if pkind == "label_statement" { var.references.clear(); }
                     var.is_undefined = false;
                     var.node_location = node.start_byte();
+                    var.definition_location.get_or_insert(node.start_byte());
                 }
                 AccessVariableType::WithoutDefinition => {
                     var.is_undefined = false;
                     var.is_unused = false;
                     var.node_location = node.start_byte();
+                    var.definition_location.get_or_insert(node.start_byte());
                 }
                 AccessVariableType::Update => {
                     var.is_unused = false;
                     if var.is_undefined { var.references.push(node_range); }
                     var.is_undefined = false;
+                    var.definition_location.get_or_insert(node.start_byte());
                 }
             }
             true
@@ -578,6 +581,7 @@ impl UserDefinitions {
         if !found {
             let mut udv = UserDefinedVariable {
                 node_location: node.start_byte(),
+                definition_location: None,
                 var_name: key.clone(),
                 var_scope: preferred_scope.clone(),
                 var_calls: 1,
@@ -596,11 +600,13 @@ impl UserDefinitions {
                     is_array: false
                 });
 
+                udv.definition_location = Some(node.start_byte());
                 self.global_defined_vars.insert(key.clone(), udv);
             } else {
                 let is_write = access_type == AccessVariableType::Write;
                 udv.is_undefined = !is_write;
                 udv.is_unused = is_write;
+                if is_write { udv.definition_location = Some(node.start_byte()); }
 
                 let node_to_check = if is_global_syntax { parent.unwrap_or(node) } else { node };
                 udv.data_type = get_variable_data_type(node_to_check, &text, &self.user_defined_types);
@@ -662,14 +668,12 @@ impl UserDefinitions {
         let mut formats = Vec::new();
         let inputs_node = node.child_by_field_name("inputs");
         if let Some(inputs) = inputs_node {
-            let inputs_text = get_node_name(inputs, &text).unwrap();
+            let inputs_text = get_node_name(inputs, &text).unwrap_or_default();
+            let outputs_text = node.child_by_field_name("outputs")
+                .and_then(|outputs| get_node_name(outputs, &text))
+                .unwrap_or_default();
             formats.push(inputs_text);
-
-            let outputs_node = node.child_by_field_name("outputs");
-            if let Some(outputs) = outputs_node {
-                let outputs_text = get_node_name(outputs, &text).unwrap();
-                formats.push(outputs_text);
-            }
+            formats.push(outputs_text);
 
             let (opcode_format, inputs, outputs, udo_type) = match node.kind() {
                 "udo_definition_legacy" => {
@@ -727,17 +731,16 @@ impl UserDefinitions {
     }
 }
 
-pub fn is_diagnostic_cached(diag_key: &Diagnostic, cached_diagnostics: &mut HashSet<(u32, u32, String)>) -> bool {
+pub fn is_diagnostic_cached(diag_key: &Diagnostic, cached_diagnostics: &mut HashSet<(u32, u32, u32, u32, String)>) -> bool {
+    let range = diag_key.range;
     let dkey = (
-        diag_key.range.start.line,
-        diag_key.range.end.character,
+        range.start.line,
+        range.start.character,
+        range.end.line,
+        range.end.character,
         diag_key.message.clone()
     );
-    if !cached_diagnostics.contains(&dkey) {
-        cached_diagnostics.insert(dkey);
-        return false;
-    }
-    return true;
+    !cached_diagnostics.insert(dkey)
 }
 
 pub fn get_node_name<'a>(node: Node<'a>, text: &String) -> Option<String> {
@@ -748,27 +751,18 @@ pub fn get_node_name<'a>(node: Node<'a>, text: &String) -> Option<String> {
     None
 }
 
-fn check_opcode<'a>(node: Node<'a>) -> Option<OpcodeCheck> { // add opcode_typed_name
-    let nkind = node.kind();
-    if nkind != "opcode_name" { return None; }
+// opcode name of a call (`out oscili ...`, `oscili(...)`), also inside udo bodies
+fn is_opcode_call(node: Node) -> bool {
+    if node.kind() != "opcode_name" { return false; }
 
     let mut cnode = node.parent();
-    let mut is_function = false;
     while let Some(n) = cnode {
         if matches!(n.kind(), "function_call" | "opcode_statement") {
-            is_function = true;
-            break;
+            return true;
         }
         cnode = n.parent();
     }
-
-    if !is_function { return None; }
-
-    if !has_ancestor_of_kind(node, "udo_definition") {
-        return Some(OpcodeCheck::Opcode)
-    } else {
-        return Some(OpcodeCheck::Udo)
-    }
+    false
 }
 
 pub fn is_valid_type(type_identifier: &String) -> bool {
@@ -876,27 +870,26 @@ pub fn iterate_tree<'a>(
 
     while let Some(node) = to_visit.pop() {
         // check opcodes
-        match check_opcode(node) {
-            Some(OpcodeCheck::Opcode) => {
-                nodes_to_diagnostics.opcodes.push(node);
-            },
-            Some(OpcodeCheck::Udo) => {
-                if let Some(node_name) = get_node_name(node, &text) {
-                    nodes_to_diagnostics.udo.insert(node_name);
-                }
-            }
-            None => { }
+        if is_opcode_call(node) {
+            nodes_to_diagnostics.opcodes.push(node);
+        }
+
+        // missing tokens inserted by error recovery
+        if node.is_missing() {
+            nodes_to_diagnostics.generic_errors.push(GenericError {
+                node: node,
+                error_type: GErrors::Missing
+            });
         }
 
         match node.kind() {
             // check types
             "typed_identifier" | "typed_opcode_name" => {
                 if let Some(p) = node.parent() {
-                    if let Some(node_explicit_type) = node.child_by_field_name("type") {
-                        let node_name = node.child_by_field_name("name").unwrap();
-
-                        let name = get_node_name(node_name, &text).unwrap();
-                        let ty = get_node_name(node_explicit_type, &text).unwrap();
+                    let name_and_type = node.child_by_field_name("type")
+                        .zip(node.child_by_field_name("name"))
+                        .and_then(|(t, n)| Some((t, get_node_name(n, &text)?, get_node_name(t, &text)?)));
+                    if let Some((node_explicit_type, name, ty)) = name_and_type {
                         if node_explicit_type.kind() == "identifier" && !valid_modern_udo_signature_type(&ty, node_explicit_type) {
                             nodes_to_diagnostics.types.push(node_explicit_type);
                         }
@@ -993,23 +986,23 @@ pub fn iterate_tree<'a>(
                     if let Some(macro_name_text) = get_node_name(macro_name, &text) {
                         if let Some(macro_id) = macro_name.child_by_field_name("id") {
                             let mid = get_node_name(macro_id, &text).unwrap_or_default();
-                            if let Some(values) = node.child_by_field_name("macro_values") {
-                                let mv = get_node_name(values, &text).unwrap_or_default();
+                            let mv = node.child_by_field_name("macro_values")
+                                .and_then(|values| get_node_name(values, &text))
+                                .unwrap_or_default();
 
-                                nodes_to_diagnostics.user_definitions.user_defined_macros
-                                    .entry(mid.clone())
-                                    .and_modify(|m| {
-                                        m.node_location = node.start_byte();
-                                        m.macro_label = macro_name_text.clone();
-                                        m.macro_values = mv.clone();
-                                    })
-                                    .or_insert_with(|| UserDefinedMacro {
-                                        node_location: node.start_byte(),
-                                        macro_name: mid.clone(),
-                                        macro_label: macro_name_text.clone(),
-                                        macro_values: mv.clone()
-                                    });
-                            }
+                            nodes_to_diagnostics.user_definitions.user_defined_macros
+                                .entry(mid.clone())
+                                .and_modify(|m| {
+                                    m.node_location = node.start_byte();
+                                    m.macro_label = macro_name_text.clone();
+                                    m.macro_values = mv.clone();
+                                })
+                                .or_insert_with(|| UserDefinedMacro {
+                                    node_location: node.start_byte(),
+                                    macro_name: mid.clone(),
+                                    macro_label: macro_name_text.clone(),
+                                    macro_values: mv.clone()
+                                });
                         }
                     }
                 }
@@ -1027,8 +1020,8 @@ pub fn iterate_tree<'a>(
             "udo_definition_legacy" | "udo_definition_modern" => {
                 if let Some(node_name) = node.child_by_field_name("name") {
                     if let Some(op_name) = get_node_name(node_name, &text) {
-                        let node_key = op_name.clone();
-                        nodes_to_diagnostics.user_definitions.add_udo(node, &node_key, &text);
+                        nodes_to_diagnostics.user_definitions.add_udo(node, &op_name, &text);
+                        nodes_to_diagnostics.udo.insert(op_name);
                     }
                 }
             },
@@ -1065,22 +1058,16 @@ pub fn iterate_tree<'a>(
                     c.child_by_field_name("id").and_then(|n| get_node_name(n, &text))
                 }).unwrap_or(None);
 
-                let is_valid_instr = name
+                // a macro standing for an instrument statement needs p1, p2 and p3
+                let is_incomplete_instr = name
                     .as_deref()
-                    .and_then(|n| Some(n.trim()
-                        .strip_prefix("i")
-                        .is_some() && node.child_count() >= 3));
+                    .is_some_and(|n| n.trim().starts_with('i') && node.child_count() < 3);
 
-                match is_valid_instr {
-                    Some(condition) => {
-                        if !condition {
-                                nodes_to_diagnostics.generic_errors.push(GenericError {
-                                node: node,
-                                error_type: GErrors::MissingPfield
-                            });
-                        }
-                    },
-                    None => { }
+                if is_incomplete_instr {
+                    nodes_to_diagnostics.generic_errors.push(GenericError {
+                        node: node,
+                        error_type: GErrors::MissingPfield
+                    });
                 }
             },
             "score_statement_instr" => {
@@ -1124,16 +1111,9 @@ pub fn iterate_tree<'a>(
 
                         let pfile = Path::new(fpath.trim());
                         if pfile.extension().and_then(|e| e.to_str()) == Some("udo") {
-                            let uf = UdoFile::new(&pfile, uri.clone());
                             nodes_to_diagnostics.included_udo_files
                                 .entry(pfile.to_string_lossy().to_string())
-                                .and_modify(|m| {
-                                    if m.content_hash != uf.content_hash {
-                                        m.content_hash = uf.content_hash.clone();
-                                        m.content = uf.content.clone()
-                                    }
-                                })
-                                .or_insert(uf);
+                                .or_insert_with(|| UdoFile::new(&pfile, uri.clone()));
                         }
                     }
                 }
@@ -1342,22 +1322,8 @@ pub fn get_node_range(node: &Node, expand_line: Option<&String>) -> Range {
     }
 }
 
-pub fn find_node_at_position<'a>(tree: &'a Tree, pos: &Position) -> Option<Node<'a>> {
-    let row = pos.line as usize;
-    let col = pos.character as usize;
-
-    tree.root_node().descendant_for_point_range(
-        Point::new(row, col),
-        Point::new(row, col),
-    )
-}
-
-pub fn find_node_at_cursor<'a>(tree: &'a Tree, pos: &Position, text: &str) -> Option<Node<'a>> {
-    let target_line = pos.line as usize;
-    let target_char = pos.character as usize;
-    let line = text.lines().nth(target_line).unwrap_or("");
-    let current_char_utf8 = utils::find_char_byte(line, target_char);
-    find_node_at_position(&tree, &Position { line: target_line as u32, character: current_char_utf8 as u32 })
+pub fn find_node_at_point<'a>(tree: &'a Tree, point: Point) -> Option<Node<'a>> {
+    tree.root_node().descendant_for_point_range(point, point)
 }
 
 // find local scope
@@ -1533,82 +1499,68 @@ fn capture_to_token_type(capture: &str) -> Option<SemanticTokenType> {
     }
 }
 
+// tokens are (line, byte column, byte length, type, modifiers); get_delta_pos converts them to UTF-16
 pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String, offset: Option<Point>) -> Vec<(u32, u32, u32, u32, u32)> {
     let mut cursor = QueryCursor::new();
     let mut qmatches = cursor.matches(&query, tree.root_node(), text.as_bytes());
-    let mut tokens: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // (line, col, length, type)
+    let mut tokens: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
 
     while let Some(m) = qmatches.next() {
         for capture in m.captures {
             let capture_name = &query.capture_names()[capture.index as usize];
-            if let Some(token_type) = capture_to_token_type(&capture_name) {
-                let start_position = capture.node.start_position();
-                let end_position = capture.node.end_position();
+            let Some(token_type) = capture_to_token_type(&capture_name) else { continue };
+            let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap_or(8) as u32;
 
-                let length = (capture.node.end_byte() - capture.node.start_byte()) as u32;
-                let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap_or(8) as u32;
+            let start_position = capture.node.start_position();
+            let node_text = &text[capture.node.start_byte()..capture.node.end_byte()];
 
-                if start_position.row == end_position.row {
-                    let mut line = start_position.row as u32;
-                    let mut col = start_position.column as u32;
-                    if let Some(off) = offset {
-                        line += off.row as u32;
-                        if start_position.row == 0 { col += off.column as u32; }
-                    }
+            // multi-line nodes (block comments, strings) become one token per line
+            for (i, line_content) in node_text.lines().enumerate() {
+                if line_content.is_empty() { continue; }
 
-                    tokens.push((line, col, length, ttype, 0));
-                } else {
-                    let start_byte = capture.node.start_byte();
-                    let end_byte = capture.node.end_byte();
-                    let ntext = &text[start_byte..end_byte];
-
-                    for (i, line_content) in ntext.lines().enumerate() {
-                        let current_row = start_position.row + i;
-                        let current_column = if i == 0 { start_position.column } else { 0 };
-                        let lenght = line_content.encode_utf16().count();
-                        if lenght == 0 { continue; }
-
-                        let mut final_row = current_row as u32;
-                        let mut final_column = current_column as u32;
-
-                        if let Some(off) = offset {
-                            final_row += off.row as u32;
-                            if start_position.row == 0 { final_column += off.column as u32; }
-                        }
-
-                        tokens.push((final_row, final_column, length, ttype, 0));
-                    }
+                let mut row = start_position.row + i;
+                let mut column = if i == 0 { start_position.column } else { 0 };
+                if let Some(off) = offset {
+                    if row == 0 { column += off.column; }
+                    row += off.row;
                 }
+
+                tokens.push((row as u32, column as u32, line_content.len() as u32, ttype, 0));
             }
         }
     }
     tokens
 }
 
-pub fn get_delta_pos(semantic_tokens: &mut Vec<(u32, u32, u32, u32, u32)>) -> Vec<SemanticToken> {
-    semantic_tokens.sort_by(|a, b| { if a.0 == b.0 { a.1.cmp(&b.1) } else { a.0.cmp(&b.0) }});
+pub fn get_delta_pos(semantic_tokens: &mut Vec<(u32, u32, u32, u32, u32)>, text: &Rope) -> Vec<SemanticToken> {
+    // stable sort: on equal starts the first capture wins
+    semantic_tokens.sort_by_key(|t| (t.0, t.1));
     let mut stokens = Vec::new();
 
     let mut prev_line = 0u32;
     let mut prev_start = 0u32;
-    for (line, col, length, ttype, bitmask) in semantic_tokens {
-        let delta_line = *line - prev_line;
-        let delta_start = if delta_line == 0 {
-            *col - prev_start
-        } else {
-            *col
-        };
+    let mut prev_end = 0u32;
+    for &(line, col, length, ttype, bitmask) in semantic_tokens.iter() {
+        let start = utils::point_to_lsp_position(text, line as usize, col as usize).character;
+        let end = utils::point_to_lsp_position(text, line as usize, (col + length) as usize).character;
 
+        // LSP does not allow overlapping tokens
+        if end <= start || (line == prev_line && start < prev_end) {
+            continue;
+        }
+
+        let delta_line = line - prev_line;
         stokens.push(SemanticToken {
             delta_line,
-            delta_start,
-            length: *length,
-            token_type: *ttype,
-            token_modifiers_bitset: *bitmask,
+            delta_start: if delta_line == 0 { start - prev_start } else { start },
+            length: end - start,
+            token_type: ttype,
+            token_modifiers_bitset: bitmask,
         });
 
-        prev_line = *line;
-        prev_start = *col;
+        prev_line = line;
+        prev_start = start;
+        prev_end = end;
     }
     stokens
 }
@@ -1773,24 +1725,6 @@ pub fn make_indent(tree: &Tree, text: &String, line: usize) -> usize {
     if indent < 0 { return 0 } else { return indent as usize };
 }
 
-pub fn add_local_udos_to_cs_references(udos: &HashMap<String, Udo>, cs_references: &mut assets::CsoundJsonData) -> bool {
-    let opdata = cs_references.opcodes_data.as_mut();
-    if let Some(opdata) = opdata {
-        for (udo, prefix) in udos.iter() {
-            let prefix = prefix.signature.clone();
-            if let None = opdata.get(udo) {
-                opdata.insert(udo.clone(), assets::OpcodesData {
-                    prefix: prefix.strip_prefix("opcode ").unwrap().to_string(),
-                    body: assets::BodyOpCompletion::SingleLine(udo.clone()),
-                    description: format!("user-defined opcode" )
-                });
-            }
-        }
-        return true;
-    }
-    return false;
-}
-
 fn has_specific_node(node: Node, expected_kind: &str) -> bool {
     let mut cursor = node.walk();
     let mut skip_root = false;
@@ -1836,7 +1770,7 @@ pub fn get_doc_type(root_node: Node) -> TreeType {
         let n = cursor.node();
         match n.kind() {
             "csd_file" =>  return TreeType::Csd,
-            "cs_orchestra_udo" => return TreeType::Orc,
+            "cs_orchestra" | "cs_udo" => return TreeType::Orc,
             "cs_score" => return TreeType::Sco,
             _ => { }
         }
@@ -1930,4 +1864,82 @@ mod tests {
             "legacy-typed writePointer output should keep the existing unused-definition behavior"
         );
     }
+    fn decode_tokens(tokens: &[SemanticToken]) -> Vec<(u32, u32, u32, u32)> {
+        let (mut line, mut start) = (0, 0);
+        tokens.iter().map(|t| {
+            if t.delta_line != 0 { start = 0; }
+            line += t.delta_line;
+            start += t.delta_start;
+            (line, start, t.length, t.token_type)
+        }).collect()
+    }
+
+    #[test]
+    fn opcodes_inside_udo_bodies_are_checked() {
+        let text = "opcode Foo, a, a\n  ain xin\n  aout typoOscil ain\n  xout aout\nendop\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+        let calls: Vec<String> = nodes.opcodes.iter().filter_map(|n| get_node_name(*n, &text)).collect();
+
+        assert!(calls.contains(&"typoOscil".to_string()), "{calls:?}");
+        assert!(nodes.udo.contains("Foo"), "{:?}", nodes.udo);
+        assert!(!nodes.udo.contains("typoOscil"), "{:?}", nodes.udo);
+    }
+
+    #[test]
+    fn missing_nodes_are_reported() {
+        let text = "instr 1\n  kv = $\nendin\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+        let missing: Vec<&str> = nodes.generic_errors.iter()
+            .filter(|e| matches!(e.error_type, GErrors::Missing))
+            .map(|e| e.node.kind())
+            .collect();
+        assert_eq!(missing, vec!["identifier"]);
+    }
+
+    #[test]
+    fn include_in_unsaved_document_does_not_panic() {
+        let text = "#include \"lib.udo\"\ninstr 1\nendin\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("untitled:Untitled-1").unwrap());
+        let file = nodes.included_udo_files.values().next().unwrap();
+        assert_eq!(file.path, PathBuf::from("lib.udo"));
+        assert!(file.content.is_none());
+    }
+
+    #[test]
+    fn multiline_semantic_tokens_are_split_per_line_in_utf16() {
+        let text = "instr 1\n/* \u{e8}\nabcdef */\nendin\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let queries = load_queries();
+        let mut tokens = get_semantic_tokens(&queries.csound_highlights, &parsed.tree, &text, None);
+        let decoded = decode_tokens(&get_delta_pos(&mut tokens, &Rope::from_str(&text)));
+        let comment = SEMANTIC_TOKENS.iter().position(|t| *t == SemanticTokenType::COMMENT).unwrap() as u32;
+
+        let comments: Vec<(u32, u32, u32)> = decoded.iter()
+            .filter(|t| t.3 == comment)
+            .map(|t| (t.0, t.1, t.2))
+            .collect();
+        // "/* è" is 5 bytes but 4 UTF-16 units
+        assert_eq!(comments, vec![(1, 0, 4), (2, 0, 9)]);
+    }
+
+    #[test]
+    fn semantic_tokens_use_utf16_columns_and_do_not_overlap() {
+        let text = "instr 1\n  S1 = \"\u{1F3B5}\" ; x\n  aSig oscili 0.5, 440\nendin\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let queries = load_queries();
+        let mut tokens = get_semantic_tokens(&queries.csound_highlights, &parsed.tree, &text, None);
+        let decoded = decode_tokens(&get_delta_pos(&mut tokens, &Rope::from_str(&text)));
+
+        for pair in decoded.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(a.0 < b.0 || a.1 + a.2 <= b.1, "overlapping tokens {a:?} {b:?}");
+        }
+        // the comment after the emoji string starts at UTF-16 column 12
+        let comment = SEMANTIC_TOKENS.iter().position(|t| *t == SemanticTokenType::COMMENT).unwrap() as u32;
+        assert!(decoded.contains(&(1, 12, 3, comment)), "{decoded:?}");
+    }
+
 }

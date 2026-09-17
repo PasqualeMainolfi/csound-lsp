@@ -1,5 +1,6 @@
 use crate::utils;
 
+use once_cell::sync::Lazy;
 use regex::{ Regex, Captures };
 use serde::Deserialize;
 use std::{
@@ -53,12 +54,15 @@ fn load_opcodes(opcodes_folder: &Path, examples_folder: &Path) -> std::io::Resul
     Ok(map)
 }
 
+static INCLUDE_EXAMPLE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"--8<--\s+"([^"]+)""#).unwrap());
+
 fn expand_includes(content: &str, examples_folder: &Path) -> String {
-    let rex = Regex::new(r#"--8<--\s+"([^"]+)""#).unwrap();
-    rex.replace_all(content, |cap: &Captures| {
+    INCLUDE_EXAMPLE.replace_all(content, |cap: &Captures| {
         let cap_str = &cap[1].to_string();
         let entire_path = Path::new(cap_str);
-        let path = entire_path.file_name().and_then(|f| f.to_str()).unwrap();
+        let Some(path) = entire_path.file_name().and_then(|f| f.to_str()) else {
+            return format!("<!-- undefined includes {} -->", cap_str);
+        };
         let internal_path = examples_folder.join(path);
         match std::fs::read_to_string(&internal_path) {
             Ok(f) => f,
@@ -128,7 +132,9 @@ pub async fn load_manual_resources(
     let ex_path = manual_dir_path.join(&EXAMPLES_DIR);
 
     if op_path.exists() {
-        if let Ok(opcodes) = load_opcodes(&op_path, &ex_path) {
+        // ~1300 markdown files: read them off the async runtime
+        let loaded = tokio::task::spawn_blocking(move || load_opcodes(&op_path, &ex_path)).await;
+        if let Ok(Ok(opcodes)) = loaded {
             *json_opcodes = opcodes;
         }
         *temp_manual_path = manual_dir_path.clone();

@@ -3,9 +3,8 @@ use crate::parser;
 use std::path::{Path, PathBuf};
 use std::io;
 use reqwest::Client;
+use ropey::Rope;
 use tower_lsp::lsp_types::{
-    CompletionItem,
-    CompletionItemKind,
     Diagnostic,
     DiagnosticSeverity,
     DiagnosticTag,
@@ -14,11 +13,11 @@ use tower_lsp::lsp_types::{
     MarkupContent,
     MarkupKind,
     Position,
-    SemanticTokenType,
-    Documentation
+    Range,
+    SemanticTokenType
 };
 use serde::Deserialize;
-use tree_sitter::Node;
+use tree_sitter::{ Node, Point };
 use zip::ZipArchive;
 
 
@@ -186,7 +185,12 @@ pub async fn get_release_tag_from_github(client: &Client, github_api_latest: &st
 }
 
 pub async fn download_from_github(url: &str, temp_path: &Path, local_file: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let response = reqwest::get(url).await?;
+    let client = Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(120))
+        .user_agent("csound-lsp")
+        .build()?;
+    let response = client.get(url).send().await?;
 
     if !response.status().is_success() {
         return Err(format!("Download from {} failed: {}", url, response.status()).into());
@@ -237,34 +241,51 @@ pub fn check_valid_resource_dir(dir: &Path, label: &str) -> Result<PathBuf, Box<
     Err(format!("{}: no valid resource dir founded", label).into())
 }
 
-pub fn find_char_byte(line: &str, target_char: usize) -> usize {
-    let mut current_char_utf16 = 0 as usize;
-    let mut current_char_utf8 = 0 as usize;
-    for char in line.chars() {
-        let char_utf16 = char.len_utf16();
-        if current_char_utf16 + char_utf16 >= target_char {
-            break;
-        }
-        current_char_utf16 += char_utf16;
-        current_char_utf8 += char.len_utf8();
+// LSP positions count UTF-16 code units, tree-sitter points count bytes.
+
+fn line_len_chars(line: ropey::RopeSlice) -> usize {
+    let mut len = line.len_chars();
+    while len > 0 && matches!(line.char(len - 1), '\n' | '\r') {
+        len -= 1;
     }
-    current_char_utf8
+    len
 }
 
-pub fn position_to_start_byte(pos: &Position, text: &String) -> usize {
-    let target_line = pos.line as usize;
-    let target_char = pos.character as usize;
-    let mut offset = 0;
-    for (i, line) in text.lines().enumerate() {
-        if i == target_line as usize {
-            let current_char = find_char_byte(line, target_char);
-            offset += current_char;
-            break;
-        } else {
-            offset += line.len() + 1;
-        }
+// char index of an LSP position, clamped to the line and to the document
+pub fn lsp_position_to_char(text: &Rope, pos: &Position) -> usize {
+    let row = pos.line as usize;
+    if row >= text.len_lines() {
+        return text.len_chars();
     }
-    offset
+    let line = text.line(row);
+    let max_units = line.char_to_utf16_cu(line_len_chars(line));
+    text.line_to_char(row) + line.utf16_cu_to_char((pos.character as usize).min(max_units))
+}
+
+pub fn char_to_point(text: &Rope, char_idx: usize) -> Point {
+    let row = text.char_to_line(char_idx);
+    Point { row, column: text.char_to_byte(char_idx) - text.line_to_byte(row) }
+}
+
+pub fn lsp_position_to_point(text: &Rope, pos: &Position) -> Point {
+    char_to_point(text, lsp_position_to_char(text, pos))
+}
+
+pub fn point_to_lsp_position(text: &Rope, row: usize, column: usize) -> Position {
+    if row >= text.len_lines() {
+        return Position::new(row as u32, column as u32);
+    }
+    let line = text.line(row);
+    let char_idx = line.byte_to_char(column.min(line.len_bytes()));
+    Position::new(row as u32, line.char_to_utf16_cu(char_idx) as u32)
+}
+
+// converts a range built from tree-sitter points (byte columns) to UTF-16 columns
+pub fn range_to_utf16(text: &Rope, range: Range) -> Range {
+    Range {
+        start: point_to_lsp_position(text, range.start.line as usize, range.start.character as usize),
+        end: point_to_lsp_position(text, range.end.line as usize, range.end.character as usize)
+    }
 }
 
 pub fn diagnostic_helper(node: &Node, severity: DiagnosticSeverity, message: String, tags: Option<Vec<DiagnosticTag>>) -> Diagnostic {
@@ -302,16 +323,5 @@ pub fn hover_helper(doc: String) -> Hover {
             value: doc,
         }),
         range: None,
-    }
-}
-
-pub fn completion_helper(label: String, kind: CompletionItemKind, detail: String, text: String, doc: String) -> CompletionItem {
-    CompletionItem {
-        label: label,
-        kind: Some(kind),
-        detail: Some(detail),
-        insert_text: Some(text),
-        documentation: Some(Documentation::String(doc)),
-        ..Default::default()
     }
 }

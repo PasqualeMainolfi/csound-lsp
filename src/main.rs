@@ -1,4 +1,5 @@
 mod server;
+mod completion;
 mod parser;
 mod utils;
 mod assets;

@@ -1,13 +1,12 @@
-use crate::{
-    assets::{self, BodyOpCompletion, OpcodesData}, parser::{self, UserDefinedMacro, UserDefinedType }
-};
+use crate::parser::{ self, UserDefinedMacro, UserDefinedType };
 use tree_sitter::Parser;
 use tower_lsp::lsp_types::Url;
 
 use std::{
     collections::{HashMap, HashSet},
     hash::{ DefaultHasher, Hash, Hasher },
-    path::{ Path, PathBuf }
+    path::{ Path, PathBuf },
+    time::SystemTime
 };
 
 
@@ -16,6 +15,7 @@ pub struct UdoFile {
     pub path: PathBuf,
     pub content: Option<String>,
     pub content_hash: Option<u64>,
+    pub modified: Option<SystemTime>,
     pub user_defined_opcodes: HashMap<String, parser::Udo>,
     pub user_defined_types: HashMap<String, UserDefinedType>,
     pub user_defined_macros: HashMap<String, UserDefinedMacro>,
@@ -26,31 +26,22 @@ pub struct UdoFile {
 
 impl UdoFile {
     pub fn new(ufile_path: impl AsRef<Path>, uri: Url) -> Self {
-        let bdir = uri.to_file_path().unwrap();
-        let base_dir = bdir
-            .parent()
-            .unwrap();
+        // unsaved documents (`untitled:`) have no directory: relative includes stay unresolved
+        let base_dir = uri.to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf));
 
         let pfile = ufile_path.as_ref();
-        let full_path = if pfile.is_absolute() {
-            pfile.to_path_buf()
-        } else {
-            base_dir.join(pfile)
+        let full_path = match base_dir {
+            Some(dir) if !pfile.is_absolute() => dir.join(pfile),
+            _ => pfile.to_path_buf()
         };
-
-        let bytes = std::fs::read(&full_path).ok();
-        let mut h: Option<u64> = None;
-        let cont = bytes.as_ref().map(|c| {
-            let mut hasher = DefaultHasher::new();
-            c.hash(&mut hasher);
-            h = Some(hasher.finish());
-            String::from_utf8_lossy(&c).to_string()
-        });
 
         Self {
             path: full_path,
-            content: cont,
-            content_hash: h,
+            content: None,
+            content_hash: None,
+            modified: None,
             user_defined_opcodes: HashMap::new(),
             user_defined_types: HashMap::new(),
             user_defined_macros: HashMap::new(),
@@ -60,9 +51,34 @@ impl UdoFile {
         }
     }
 
+    // Re-reads the file when its modification time changes.
+    // Returns true when the content differs from the last read.
+    pub fn refresh(&mut self) -> bool {
+        let modified = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        if modified.is_some() && modified == self.modified {
+            return false;
+        }
+        self.modified = modified;
+
+        let content = std::fs::read(&self.path).ok();
+        let hash = content.as_ref().map(|bytes| {
+            let mut hasher = DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            hasher.finish()
+        });
+        if hash == self.content_hash {
+            return false;
+        }
+
+        self.content_hash = hash;
+        self.content = content.map(|bytes| String::from_utf8_lossy(&bytes).to_string());
+        true
+    }
+
     pub fn iterate_included_udo_file(&mut self, parser: &mut Parser) -> Result<(), String> {
         if let Some(ref text) = self.content {
-            let udo_tree = parser.parse(text.as_str(), None).unwrap();
+            let udo_tree = parser.parse(text.as_str(), None)
+                .ok_or_else(|| format!("Impossible to parse .udo file: {:?}", self.path))?;
             let mut user_definitions = parser::UserDefinitions::new();
             let mut udo_list = HashSet::new();
             let mut type_list = HashSet::new();
@@ -97,25 +113,25 @@ impl UdoFile {
                             if let Some(macro_name_text) = parser::get_node_name(macro_name, text) {
                                 if let Some(macro_id) = macro_name.child_by_field_name("id") {
                                     let mid = parser::get_node_name(macro_id, &text).unwrap_or_default();
-                                    if let Some(values) = node.child_by_field_name("macro_values") {
-                                        let mv = parser::get_node_name(values, &text).unwrap_or_default();
+                                    let mv = node.child_by_field_name("macro_values")
+                                        .and_then(|values| parser::get_node_name(values, &text))
+                                        .unwrap_or_default();
 
-                                        user_definitions.user_defined_macros
-                                            .entry(mid.clone())
-                                            .and_modify(|m| {
-                                                m.node_location = node.start_byte();
-                                                m.macro_label = macro_name_text.clone();
-                                                m.macro_values = mv.clone();
-                                            })
-                                            .or_insert_with(|| UserDefinedMacro {
-                                                node_location: node.start_byte(),
-                                                macro_name: mid.clone(),
-                                                macro_label: macro_name_text.clone(),
-                                                macro_values: mv.clone()
-                                            });
+                                    user_definitions.user_defined_macros
+                                        .entry(mid.clone())
+                                        .and_modify(|m| {
+                                            m.node_location = node.start_byte();
+                                            m.macro_label = macro_name_text.clone();
+                                            m.macro_values = mv.clone();
+                                        })
+                                        .or_insert_with(|| UserDefinedMacro {
+                                            node_location: node.start_byte(),
+                                            macro_name: mid.clone(),
+                                            macro_label: macro_name_text.clone(),
+                                            macro_values: mv.clone()
+                                        });
 
-                                        macro_list.insert(mid);
-                                    }
+                                    macro_list.insert(mid);
                                 }
                             }
                         }
@@ -137,31 +153,15 @@ impl UdoFile {
             self.type_list = type_list;
             self.macro_list = macro_list;
         } else {
-            return Err(format!("Impossible to parse .udo file. Content corrupted: {:#?} {:?}", self.path, self.content))
+            // the file is gone: its definitions are gone too
+            self.user_defined_opcodes.clear();
+            self.user_defined_types.clear();
+            self.user_defined_macros.clear();
+            self.udo_list.clear();
+            self.type_list.clear();
+            self.macro_list.clear();
+            return Err(format!("Impossible to read .udo file: {}", self.path.display()))
         }
         Ok(())
     }
-}
-
-pub fn add_included_udos_to_cs_references(udos: &HashMap<String, UdoFile>, cs_references: &mut assets::CsoundJsonData) -> bool {
-    let opdata = cs_references.opcodes_data.as_mut();
-    if let Some(opdata) = opdata {
-        for udo_file in udos.values() {
-            let udo_source = udo_file.path.file_name().unwrap().to_string_lossy().to_string();
-            for udo in udo_file.udo_list.iter() {
-                if let Some(body) = udo_file.user_defined_opcodes.get(udo) {
-                    let body = body.signature.clone();
-                    if let None = opdata.get(udo) {
-                        opdata.insert(udo.clone(), OpcodesData {
-                            prefix: body.strip_prefix("opcode ").unwrap().to_string(),
-                            body: BodyOpCompletion::SingleLine(udo.clone()),
-                            description: format!("included user-defined opcode from {}", udo_source)
-                        });
-                    }
-                }
-            }
-        }
-        return true;
-    }
-    return false;
 }

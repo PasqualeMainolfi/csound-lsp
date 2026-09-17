@@ -62,7 +62,7 @@ struct EnvMode {
     pub cs_version: CsoundVersion
 }
 
-fn check_csound_env() -> Result<EnvMode, Box<dyn std::error::Error + Send + Sync>> {
+async fn check_csound_env() -> Result<EnvMode, Box<dyn std::error::Error + Send + Sync>> {
     let op_system = match env::consts::OS {
         "linux" => OperativeSystem::Linux,
         "macos" => OperativeSystem::MacOs,
@@ -70,9 +70,10 @@ fn check_csound_env() -> Result<EnvMode, Box<dyn std::error::Error + Send + Sync
         _ => return Err("Can't check current OS".into())
     };
 
-    let cs_command = process::Command::new("csound")
+    let cs_command = tokio::process::Command::new("csound")
         .arg("--version")
         .output()
+        .await
         .map_err(Box::new)?;
 
     let cstring = String::from_utf8_lossy(&cs_command.stderr);
@@ -149,7 +150,7 @@ fn resolve_plugins_env_path_windows(cs_version: CsoundVersion) -> Option<PathBuf
 }
 
 pub async fn find_installed_plugins() -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let env: EnvMode = check_csound_env()?;
+    let env: EnvMode = check_csound_env().await?;
 
     let (path, ext) = match env.op_system {
         OperativeSystem::Linux => {
@@ -353,9 +354,10 @@ pub async fn load_plugins_resources(
                 )
             };
 
+            // a failing plugin must not stop the others
             let gh_entries: Vec<GitHubEntry> = match client.get(doc_api_url).send().await {
                 Ok(resp) => match resp.error_for_status() {
-                    Ok(resp) => resp.json().await?,
+                    Ok(resp) => resp.json().await.unwrap_or_default(),
                     Err(_) => Vec::new(),
                 },
                 Err(_) => Vec::new(),
@@ -381,7 +383,10 @@ pub async fn load_plugins_resources(
 
                 let fbytes = match client.get(download_url).send().await {
                     Ok(resp) => match resp.error_for_status() {
-                        Ok(resp) => resp.bytes().await?,
+                        Ok(resp) => match resp.bytes().await {
+                            Ok(bytes) => bytes,
+                            Err(_) => continue,
+                        },
                         Err(_) => continue,
                     },
                     Err(_) => continue,
