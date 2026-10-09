@@ -38,6 +38,7 @@ use serde::Deserialize;
 use tree_sitter_python;
 use tree_sitter_html;
 use tree_sitter_json;
+use tree_sitter_toml_ng;
 use tree_sitter_csound::{ LANGUAGE, INJECTIONS_QUERY, HIGHLIGHTS_QUERY };
 use once_cell::sync::Lazy;
 
@@ -64,6 +65,7 @@ pub struct InternalParsers {
     pub py_parser: Parser,
     pub html_parser: Parser,
     pub json_parser: Parser,
+    pub toml_parser: Parser,
 }
 
 pub struct Queries {
@@ -71,7 +73,8 @@ pub struct Queries {
     pub csound_injection: Query,
     pub py_highlights: Query,
     pub html_highlights: Query,
-    pub json_highlights: Query
+    pub json_highlights: Query,
+    pub toml_highlights: Query
 }
 
 pub fn load_queries() -> Queries {
@@ -81,6 +84,7 @@ pub fn load_queries() -> Queries {
         py_highlights: Query::new(&tree_sitter_python::LANGUAGE.into(), tree_sitter_python::HIGHLIGHTS_QUERY).unwrap(),
         html_highlights: Query::new(&tree_sitter_html::LANGUAGE.into(), tree_sitter_html::HIGHLIGHTS_QUERY).unwrap(),
         json_highlights: Query::new(&tree_sitter_json::LANGUAGE.into(), tree_sitter_json::HIGHLIGHTS_QUERY).unwrap(),
+        toml_highlights: Query::new(&tree_sitter_toml_ng::LANGUAGE.into(), tree_sitter_toml_ng::HIGHLIGHTS_QUERY).unwrap()
     }
 }
 
@@ -101,11 +105,16 @@ pub fn load_parsers() -> InternalParsers {
     let json_language = tree_sitter_json::LANGUAGE.into();
     json.set_language(&json_language).unwrap();
 
+    let mut toml = Parser::new();
+    let toml_language = tree_sitter_toml_ng::LANGUAGE.into();
+    toml.set_language(&toml_language).unwrap();
+
     InternalParsers {
         csound_parser: p,
         py_parser: py,
         html_parser: html,
         json_parser: json,
+        toml_parser: toml
     }
 }
 
@@ -928,7 +937,7 @@ pub fn iterate_tree<'a>(
 
                 if !should_skip {
                     if let Some(name) = get_node_name(node, text) {
-                        if !vec!["CsScore", "CsoundSynthesizer", "CsoundSynthesiser", "CsOptions", "CsInstruments"].contains(&name.as_str()) {
+                        if !vec!["CsScore", "CsoundSynthesizer", "CsoundSynthesiser", "CsOptions", "CsInstruments", "CsTest"].contains(&name.as_str()) {
                             let name = name.split("[").next().unwrap();
                             nodes_to_diagnostics.user_definitions.add_udv(node, &name.to_string(), text);
                         }
@@ -1576,65 +1585,70 @@ pub fn get_injections(
     html_parser: &mut Parser,
     html_query: &Query,
     json_parser: &mut Parser,
-    json_query: &Query
+    json_query: &Query,
+    toml_parser: &mut Parser,
+    toml_query: &Query,
 ) -> Vec<(u32, u32, u32, u32, u32)>
 {
     let mut cursor = QueryCursor::new();
     let mut qmatches = cursor.matches(&query_injection, tree.root_node(), text.as_bytes());
     let index_content = query_injection.capture_index_for_name("injection.content").unwrap();
 
-    let mut stokens = Vec::new();
+    // (language, start byte, end byte, start position) of each block to parse
+    let mut blocks: Vec<(String, usize, usize, Point)> = Vec::new();
+    // with `injection.combined` the captures under the same node form one block
+    let mut combined: HashMap<usize, usize> = HashMap::new();
 
     while let Some(m) = qmatches.next() {
         let settings = query_injection.property_settings(m.pattern_index);
 
         let mut lang = "";
+        let mut is_combined = false;
         for p in settings {
-            if &(*p.key) == "injection.language" {
-                if let Some(val) = &p.value {
-                    lang = val;
-                }
+            match &(*p.key) {
+                "injection.language" => if let Some(val) = &p.value { lang = val; },
+                "injection.combined" => is_combined = true,
+                _ => { }
             }
         }
 
         let capture_content = m.captures.iter().find(|c| c.index == index_content);
         if let Some(cap) = capture_content {
             let node = cap.node;
-            let start_byte = node.start_byte();
-            let end_byte = node.end_byte();
-            let start_position = node.start_position();
+            let parent_id = node.parent().map(|p| p.id());
 
-            let block = &text[start_byte..end_byte].to_string();
-
-            match lang {
-                "python" => {
-                    if let Some(py_tree) = py_parser.parse(&block, None) {
-                        let py_tokens = get_semantic_tokens(&py_query, &py_tree, &block, Some(start_position));
-                        stokens.extend(py_tokens);
-                    }
+            match parent_id.filter(|_| is_combined).and_then(|id| combined.get(&id)) {
+                Some(&i) => {
+                    let block = &mut blocks[i];
+                    block.1 = block.1.min(node.start_byte());
+                    block.2 = block.2.max(node.end_byte());
+                    if node.start_byte() == block.1 { block.3 = node.start_position(); }
                 },
-                "html" => {
-                    if let Some(html_tree) = html_parser.parse(&block, None) {
-                        let html_tokens = get_semantic_tokens(&html_query, &html_tree, &block, Some(start_position));
-                        stokens.extend(html_tokens);
+                None => {
+                    if let (true, Some(id)) = (is_combined, parent_id) {
+                        combined.insert(id, blocks.len());
                     }
-                },
-                "json" => {
-                    if let Some(json_tree) = json_parser.parse(&block, None) {
-                        let json_tokens = get_semantic_tokens(&json_query, &json_tree, &block, Some(start_position));
-                        stokens.extend(json_tokens);
-                    }
-                },
-                "csound" => {
-                    if let Some(csound_tree) = cs_parser.parse(&block, None) {
-                        let csound_tokens = get_semantic_tokens(&cs_query, &csound_tree, &block, Some(start_position));
-                        stokens.extend(csound_tokens);
-                    }
-                },
-                _ => { }
+                    blocks.push((lang.to_string(), node.start_byte(), node.end_byte(), node.start_position()));
+                }
             }
         }
+    }
 
+    let mut stokens = Vec::new();
+    for (lang, start_byte, end_byte, start_position) in blocks {
+        let block = &text[start_byte..end_byte].to_string();
+
+        let (parser, query) = match lang.as_str() {
+            "python" => (&mut *py_parser, py_query),
+            "html" => (&mut *html_parser, html_query),
+            "json" => (&mut *json_parser, json_query),
+            "toml" => (&mut *toml_parser, toml_query),
+            "csound" => (&mut *cs_parser, cs_query),
+            _ => continue
+        };
+        if let Some(injected_tree) = parser.parse(&block, None) {
+            stokens.extend(get_semantic_tokens(query, &injected_tree, &block, Some(start_position)));
+        }
     }
     stokens
 }
@@ -1809,6 +1823,30 @@ pub fn get_name_and_type_from_legacy(var: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cstest_toml_is_highlighted_as_one_block() {
+        let text = "<CsTest>\ndescription = \"binary < and <= errors\"\n[expect]\nexit = 0\n</CsTest>\n<CsoundSynthesizer>\n</CsoundSynthesizer>\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let mut parsers = load_parsers();
+        let queries = load_queries();
+        let tokens = get_injections(
+            &queries.csound_injection, &parsed.tree, &text,
+            &mut parsers.csound_parser, &queries.csound_highlights,
+            &mut parsers.py_parser, &queries.py_highlights,
+            &mut parsers.html_parser, &queries.html_highlights,
+            &mut parsers.json_parser, &queries.json_highlights,
+            &mut parsers.toml_parser, &queries.toml_highlights
+        );
+
+        let string_type = SEMANTIC_TOKENS.iter().position(|t| *t == SemanticTokenType::STRING).unwrap() as u32;
+        let value = "\"binary < and <= errors\"";
+        assert!(
+            tokens.contains(&(1, 14, value.len() as u32, string_type, 0)),
+            "TOML string split at '<': {tokens:?}"
+        );
+        assert!(tokens.iter().any(|t| t.0 == 3), "no TOML token after the '<' fragments: {tokens:?}");
+    }
 
     #[test]
     fn modern_udo_input_type_accepts_csound_signature_chars() {

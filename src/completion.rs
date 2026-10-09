@@ -24,7 +24,7 @@ use tower_lsp::lsp_types::{
 use tree_sitter::Tree;
 
 static SECTION_TAG: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"<(/?)(CsOptions|CsInstruments|CsScore|CsoundSynthesi[sz]er|CabbageARA|Cabbage|CsFileB|CsFile|CsMidifileB|CsSampleB|CsLicen[cs]e|CsShortLicen[cs]e|html)([^>]*)>").unwrap()
+    Regex::new(r"<(/?)(CsOptions|CsInstruments|CsScore|CsoundSynthesi[sz]er|CabbageARA|Cabbage|CsFileB|CsFile|CsMidifileB|CsSampleB|CsLicen[cs]e|CsShortLicen[cs]e|html|CsTest)([^>]*)>").unwrap()
 });
 static BLOCK_BOUNDARY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[ \t]*(instr|opcode|endin|endop)\b[ \t]*([^\s,;(]*)").unwrap());
 static DEFINITION_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*(instr|opcode)\b").unwrap());
@@ -32,6 +32,10 @@ static STRUCT_CHAIN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"([A-Za-z_]\w*(?:\[[^\]]*\])*(?:\.[A-Za-z_]\w*(?:\[[^\]]*\])*)*)\.$").unwrap()
 });
 static SNIPPET_PLACEHOLDER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$\{?\d").unwrap());
+static SYNTHESIZER_START: Lazy<Regex> = Lazy::new(|| Regex::new(r"<CsoundSynthesi[sz]er>").unwrap());
+
+// opcode reference entry holding the .csd skeleton
+const CSD_TEMPLATE: &str = "CsoundSynthesizer";
 
 const BASE_TYPES: [&str; 12] = [
     "a", "i", "k", "b", "S", "f", "w", "InstrDef", "Instr", "Opcode", "OpcodeDef", "Complex"
@@ -311,7 +315,7 @@ fn opcode_items(src: &CompletionSources, prefix: &str, items: &mut Vec<Completio
 
     for (name, data) in opcodes {
         let is_valid_name = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
-        if !is_valid_name || !matches_prefix(name, prefix) || seen.contains(name) {
+        if !is_valid_name || name == CSD_TEMPLATE || !matches_prefix(name, prefix) || seen.contains(name) {
             continue;
         }
         let body = data.get_string_from_body();
@@ -327,6 +331,37 @@ fn opcode_items(src: &CompletionSources, prefix: &str, items: &mut Vec<Completio
             ..Default::default()
         });
     }
+}
+
+// The .csd skeleton, offered in a .csd that has no <CsoundSynthesizer> yet. A `<` typed
+// before the name is replaced too.
+fn template_items(src: &CompletionSources, ctx: &CursorContext, pos: &Position) -> Option<Vec<CompletionItem>> {
+    if SYNTHESIZER_START.is_match(src.text) || !matches_prefix(CSD_TEMPLATE, ctx.prefix) {
+        return None;
+    }
+    let data = src.references.opcodes_data.as_ref()?.get(CSD_TEMPLATE)?;
+
+    let (start, filter_text) = match ctx.before_prefix.strip_suffix('<') {
+        Some(start) => (start, format!("<{}", CSD_TEMPLATE)),
+        None => (ctx.before_prefix, CSD_TEMPLATE.to_string())
+    };
+    let range = Range {
+        start: Position { line: pos.line, character: utf16_len(start) },
+        end: Position { line: pos.line, character: utf16_len(ctx.line_before) }
+    };
+    let body = data.get_string_from_body();
+    let is_snippet = SNIPPET_PLACEHOLDER.is_match(&body);
+
+    Some(vec![CompletionItem {
+        label: CSD_TEMPLATE.to_string(),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some(data.prefix.clone()),
+        documentation: Some(Documentation::String(data.description.clone())),
+        filter_text: Some(filter_text),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit { range, new_text: body })),
+        insert_text_format: Some(if is_snippet { InsertTextFormat::SNIPPET } else { InsertTextFormat::PLAIN_TEXT }),
+        ..Default::default()
+    }])
 }
 
 fn keyword_items(prefix: &str, items: &mut Vec<CompletionItem>) {
@@ -532,6 +567,9 @@ pub fn complete(src: &CompletionSources, pos: &Position, context: Option<&Comple
         return Some(macro_items(src, ctx.prefix));
     }
 
+    if region == Region::Other {
+        return template_items(src, &ctx, pos);
+    }
     if region != Region::Orchestra {
         return None;
     }
@@ -605,7 +643,8 @@ mod tests {
             opcodes_data: Some(HashMap::from([
                 ("oscili".to_string(), opcode("oscili(xamp, xcps [, ifn, iphs])", "oscili")),
                 ("outs".to_string(), opcode("outs(asig1, asig2)", "outs")),
-                ("\\$NAME".to_string(), opcode("\\$NAME", "\\$NAME"))
+                ("\\$NAME".to_string(), opcode("\\$NAME", "\\$NAME")),
+                ("CsoundSynthesizer".to_string(), opcode("CsoundSynthesizer (.csd structure)", "<CsoundSynthesizer>"))
             ])),
             omacros_data: Some(HashMap::from([
                 ("M_PI".to_string(), OMacro { value: "3.14".to_string(), equivalent_to: "pi".to_string() })
@@ -745,6 +784,42 @@ mod tests {
         assert_eq!(edits.len(), 2, "{edits:?}");
         assert!(edits.contains(&("--output=".to_string(), 6)), "{edits:?}");
         assert!(edits.contains(&("--nodisplays".to_string(), 6)), "{edits:?}");
+    }
+
+    #[test]
+    fn csd_template_in_new_csd() {
+        let expected = Some(vec!["CsoundSynthesizer".to_string()]);
+        assert_eq!(invoked("a.csd", "Cs|"), expected);
+        assert_eq!(invoked("a.csd", "<Cs|"), expected);
+        assert_eq!(invoked("a.csd", "<CsTest>\nexit = 0\n</CsTest>\nCs|"), expected);
+    }
+
+    #[test]
+    fn csd_template_replaces_typed_angle_bracket() {
+        let (d, pos) = doc("a.csd", "<Cs|");
+        let included = HashMap::new();
+        let src = CompletionSources {
+            text: &d.text,
+            tree: &d.tree,
+            uri: &d.uri,
+            doc_type: &d.doc_type,
+            user_definitions: &d.definitions,
+            typed_vars: &d.typed_vars,
+            included_udo_files: &included,
+            references: &d.references
+        };
+        let items = complete(&src, &pos, None).unwrap();
+        let Some(CompletionTextEdit::Edit(edit)) = &items[0].text_edit else { panic!("no text edit") };
+        assert_eq!(edit.range.start.character, 0);
+        assert_eq!(edit.range.end.character, 3);
+    }
+
+    #[test]
+    fn csd_template_not_offered_once_synthesizer_exists() {
+        let csd = "<CsoundSynthesizer>\nCs|\n<CsInstruments>\n</CsInstruments>\n</CsoundSynthesizer>\n";
+        assert_eq!(invoked("a.csd", csd), None);
+        let orc = "<CsoundSynthesizer>\n<CsInstruments>\ninstr 1\n  Cs|\nendin\n</CsInstruments>\n</CsoundSynthesizer>\n";
+        assert!(!invoked("a.csd", orc).unwrap().contains(&"CsoundSynthesizer".to_string()));
     }
 
     #[test]

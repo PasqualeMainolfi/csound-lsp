@@ -451,18 +451,19 @@ impl Backend {
                 }
             }
 
-            for node in nodes_to_diagnostics.types {
-                let type_identifier = parser::get_node_name(node, &text).unwrap_or_default();
-                let is_type_included = doc.cached_included_udo_files.values().any(|t| t.type_list.contains(&type_identifier));
+            // For the time being, it is not possible to trace back to a new type.
+            // for node in nodes_to_diagnostics.types {
+            //     let type_identifier = parser::get_node_name(node, &text).unwrap_or_default();
+            //     let is_type_included = doc.cached_included_udo_files.values().any(|t| t.type_list.contains(&type_identifier));
 
-                if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) && !is_type_included {
-                    let diag = utils::diagnostic_helper(
-                        &node, DiagnosticSeverity::ERROR, format!("Unknown type identifier: <{}>", type_identifier), None
-                    );
+            //     if !parser::is_valid_type(&type_identifier) && !nodes_to_diagnostics.udt.contains(&type_identifier) && !is_type_included {
+            //         let diag = utils::diagnostic_helper(
+            //             &node, DiagnosticSeverity::ERROR, format!("Unknown type identifier: <{}>", type_identifier), None
+            //         );
 
-                    if !parser::is_diagnostic_cached(&diag, &mut cached_diag) { diagnostics.push(diag); }
-                }
-            }
+            //         if !parser::is_diagnostic_cached(&diag, &mut cached_diag) { diagnostics.push(diag); }
+            //     }
+            // }
 
             for node in nodes_to_diagnostics.generic_errors.iter() {
                 let node_name = parser::get_node_name(node.node, &text).unwrap_or_default();
@@ -755,7 +756,9 @@ impl LanguageServer for Backend {
                     &mut parsers.html_parser,
                     &queries.html_highlights,
                     &mut parsers.json_parser,
-                    &queries.json_highlights
+                    &queries.json_highlights,
+                    &mut parsers.toml_parser,
+                    &queries.toml_highlights
                 )
             };
 
