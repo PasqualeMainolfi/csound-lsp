@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "csound-lsp"
-version = "1.8.0"
+version = "1.8.2"
 dependencies = [
  "lsp-server",
  "once_cell",
@@ -1968,8 +1968,8 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-csound"
-version = "1.6.0"
-source = "git+https://github.com/PasqualeMainolfi/tree-sitter-csound.git#7d505ca70458e943240a8134a2ee93377d1b44b0"
+version = "1.6.1"
+source = "git+https://github.com/PasqualeMainolfi/tree-sitter-csound.git#6c5c43083da1a81248ebcfc1e3c46f8f82f6fa5e"
 dependencies = [
  "cc",
  "tree-sitter-language",
