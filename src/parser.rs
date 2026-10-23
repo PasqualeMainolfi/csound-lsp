@@ -368,6 +368,53 @@ fn get_udo_data_type(arg_list: &String) -> Vec<VariableData> {
     data
 }
 
+// modern udo signatures: comma separated, elements longer than one char are type names
+fn get_modern_udo_data_type(arg_list: &str, udt: &HashMap<String, UserDefinedType>) -> Vec<VariableData> {
+    let elements: Vec<&str> = arg_list.split(',').map(|e| e.trim()).filter(|e| !e.is_empty()).collect();
+    if elements.is_empty() {
+        return get_udo_data_type(&String::new())
+    }
+
+    elements.iter().map(|e| {
+        let base = e.split('[').next().unwrap_or("");
+        if base.chars().count() <= 1 {
+            return get_udo_data_type(&e.to_string()).into_iter().next()
+                .unwrap_or(VariableData { data_type: VarDataType::Unknown, data_shape: VarDataShape::Unknown, is_array: false })
+        }
+
+        let dimension = e.matches("[]").count();
+        let dtype = match base {
+            "InstrDef"  => VarDataType::InstrDef,
+            "Instr"     => VarDataType::Instr,
+            "Opcode"    => VarDataType::Opcode,
+            "OpcodeDef" => VarDataType::OpcodeDef,
+            "Complex"   => VarDataType::Complex,
+            _ if base.eq_ignore_ascii_case("void") => VarDataType::Void,
+            _           => VarDataType::Typedef(base.to_string())
+        };
+        let shape = if dimension != 0 {
+            VarDataShape::Array(dimension as u8)
+        } else if dtype == VarDataType::Void {
+            VarDataShape::NoShape
+        } else {
+            udt.get(base).map(struct_shape).unwrap_or(VarDataShape::Expression)
+        };
+        VariableData { data_type: dtype, data_shape: shape, is_array: dimension != 0 }
+    }).collect()
+}
+
+fn struct_shape(struct_def: &UserDefinedType) -> VarDataShape {
+    if let Some(ref m) = struct_def.udt_members {
+        let mut members = Vec::new();
+        for member in m.iter() {
+            members.push(format!("{}:{}", member.0, member.1));
+        }
+        VarDataShape::Struct(members.join(", "))
+    } else {
+        VarDataShape::Struct("Unknown members".to_string())
+    }
+}
+
 // also use for modern udo inputs parse
 pub fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, UserDefinedType>) -> Option<VariableData> {
     let vnode_type = match vnode.kind() {
@@ -427,21 +474,7 @@ pub fn get_variable_data_type(vnode: Node, text: &String, udt: &HashMap<String, 
                 VarDataType::Spectral   => VarDataShape::Spectra,
                 VarDataType::Void       => VarDataShape::NoShape,
                 VarDataType::Unknown    => VarDataShape::Unknown,
-                _                       => {
-                    if let Some(struct_def) = is_struct {
-                        if let Some(ref m) = struct_def.udt_members {
-                            let mut members = Vec::new();
-                            for member in m.iter() {
-                                members.push(format!("{}:{}", member.0, member.1));
-                            }
-                            VarDataShape::Struct(members.join(", "))
-                        } else {
-                            VarDataShape::Struct("Unknown members".to_string())
-                        }
-                    } else {
-                        VarDataShape::Expression
-                    }
-                }
+                _                       => is_struct.map(struct_shape).unwrap_or(VarDataShape::Expression)
             }
         }
     };
@@ -700,18 +733,18 @@ impl UserDefinitions {
                             if i.contains(':') {
                                 i.split(':').last().map(|s| s.to_string())
                             } else {
-                                let (_, utype) = get_name_and_type_from_legacy(i);
+                                let (_, utype) = get_name_and_type_from_legacy(i.trim());
                                 Some(utype)
                             }
                         })
                         .map(|s| s.trim().to_string())
                         .collect::<Vec<String>>()
-                        .join("");
+                        .join(",");
 
-                    let out_text = formats[1].chars().filter(|c| !matches!(*c, '(' | ')')).collect();
+                    let out_text: String = formats[1].chars().filter(|c| !matches!(*c, '(' | ')')).collect();
 
-                    let inps = get_udo_data_type(&inp_text);
-                    let outs = get_udo_data_type(&out_text);
+                    let inps = get_modern_udo_data_type(&inp_text, &self.user_defined_types);
+                    let outs = get_modern_udo_data_type(&out_text, &self.user_defined_types);
                     (form, inps, outs, UdoType::Modern)
                 },
                 _ => { ("".to_string(), vec![], vec![], UdoType::Unknown) }
@@ -788,7 +821,9 @@ fn is_valid_output_udo_types<'a>(type_identifier: &String, node: Node<'a>) -> bo
 
     match node.kind() {
         "modern_udo_outputs" => {
-            if trimmed.eq_ignore_ascii_case("void") {
+            // elements longer than one char are type names (void, user-defined types)
+            let base = trimmed.split('[').next().unwrap_or("");
+            if base.chars().count() > 1 {
                 return true
             }
         },
@@ -1880,6 +1915,82 @@ mod tests {
         assert!(
             nodes.types.iter().any(|node| get_node_name(*node, &text).as_deref() == Some("z")),
             "invalid modern UDO input type should still be sent through regular type diagnostics"
+        );
+    }
+
+    #[test]
+    fn modern_udo_output_user_defined_type_is_not_an_error() {
+        let text = "opcode get_time_vector(vec:CsnArr, pulses:i, bpm:i):(CsnArr)\n  xout vec\nendop\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+
+        assert!(
+            !nodes.generic_errors.iter().any(|e| matches!(e.error_type, GErrors::ExplicitType)),
+            "user-defined type in modern UDO outputs should not be reported"
+        );
+    }
+
+    #[test]
+    fn modern_udo_output_single_char_types_are_checked() {
+        let explicit_type_errors = |sig: &str| -> Vec<String> {
+            let text = format!("opcode foo(x:k):{sig}\n  xout x\nendop\n");
+            let parsed = parse_doc(&text, None);
+            let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+            nodes.generic_errors.iter()
+                .filter(|e| matches!(e.error_type, GErrors::ExplicitType))
+                .filter_map(|e| get_node_name(e.node, &text))
+                .collect()
+        };
+
+        for sig in ["(a)", "(k[])", "(void)", "(kk)", "(CsnArr[])", "(CsnArr, i, i)", "(k[], a)", "a", "void"] {
+            assert!(explicit_type_errors(sig).is_empty(), "{sig} should be a valid modern UDO output");
+        }
+        for (sig, ty) in [("(z)", "z"), ("(k[)", "k["), ("(CsnArr, z)", "z")] {
+            assert_eq!(explicit_type_errors(sig), vec![ty.to_string()], "{sig} should be reported");
+        }
+    }
+
+    #[test]
+    fn modern_udo_args_use_type_names() {
+        let text = "struct CsnArr a:k\nopcode foo(vec:CsnArr, kAmp, cnt:k[], d:InstrDef):(CsnArr, i)\n  xout vec, 1\nendop\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+        let udo = nodes.user_definitions.user_defined_opcodes.get("foo").unwrap();
+        let types = |args: &Vec<UdoArg>| args.iter().map(|a| (a.arg.data_type.clone(), a.arg.data_shape.clone())).collect::<Vec<_>>();
+        let csn_arr = (VarDataType::Typedef("CsnArr".to_string()), VarDataShape::Struct("a:k".to_string()));
+
+        assert_eq!(types(&udo.inputs), vec![
+            csn_arr.clone(),
+            (VarDataType::KontrolRate, VarDataShape::Scalar),
+            (VarDataType::KontrolRate, VarDataShape::Array(1)),
+            (VarDataType::InstrDef, VarDataShape::Expression),
+        ]);
+        assert_eq!(types(&udo.outputs), vec![csn_arr, (VarDataType::InitTime, VarDataShape::Scalar)]);
+    }
+
+    #[test]
+    fn modern_udo_void_and_empty_signatures() {
+        let text = "opcode foo():(void)\nendop\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+        let udo = nodes.user_definitions.user_defined_opcodes.get("foo").unwrap();
+
+        for args in [&udo.inputs, &udo.outputs] {
+            assert_eq!(args.len(), 1);
+            assert_eq!(args[0].arg.data_type, VarDataType::Void);
+        }
+    }
+
+    #[test]
+    fn invalid_legacy_udo_output_type_is_an_error() {
+        let text = "opcode bad_output, z, k\nendop\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap());
+
+        assert!(
+            nodes.generic_errors.iter().any(|e| matches!(e.error_type, GErrors::ExplicitType)
+                && get_node_name(e.node, &text).as_deref() == Some("z")),
+            "invalid legacy UDO output type should still be reported"
         );
     }
 
