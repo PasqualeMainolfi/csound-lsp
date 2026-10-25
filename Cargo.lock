@@ -1969,7 +1969,7 @@ dependencies = [
 [[package]]
 name = "tree-sitter-csound"
 version = "1.6.2"
-source = "git+https://github.com/PasqualeMainolfi/tree-sitter-csound.git#c6bdc974b269e9b20fe82780c63e12be369d5bdf"
+source = "git+https://github.com/PasqualeMainolfi/tree-sitter-csound.git#adfa06e410c51335823c3537b2c724a3cf7b24f8"
 dependencies = [
  "cc",
  "tree-sitter-language",

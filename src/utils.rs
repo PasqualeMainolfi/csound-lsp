@@ -37,7 +37,7 @@ pub const SEMANTIC_TOKENS: &[SemanticTokenType] = &[
     SemanticTokenType::OPERATOR
 ];
 
-pub const OMACROS: [&'static str; 15] = [
+pub const OMACROS: [&'static str; 16] = [
     "M_E",
     "MLOG2E",
     "M_LOG10E",
@@ -50,6 +50,7 @@ pub const OMACROS: [&'static str; 15] = [
     "M_2_PI",
     "M_2_SQRTPI",
     "M_SQRT2",
+    "M_SQRT1_2",
     "M_MAX_VALUE",
     "M_MIN_VALUE",
     "M_INF"
