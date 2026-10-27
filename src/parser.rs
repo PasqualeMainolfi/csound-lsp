@@ -1546,31 +1546,32 @@ fn capture_to_token_type(capture: &str) -> Option<SemanticTokenType> {
 // tokens are (line, byte column, byte length, type, modifiers); get_delta_pos converts them to UTF-16
 pub fn get_semantic_tokens(query: &Query, tree: &Tree, text: &String, offset: Option<Point>) -> Vec<(u32, u32, u32, u32, u32)> {
     let mut cursor = QueryCursor::new();
-    let mut qmatches = cursor.matches(&query, tree.root_node(), text.as_bytes());
+    // captures (not matches) come in position order and, for the same node, in pattern
+    // order; get_delta_pos keeps the first token, so earlier, more specific patterns win
+    let mut qcaptures = cursor.captures(&query, tree.root_node(), text.as_bytes());
     let mut tokens: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
 
-    while let Some(m) = qmatches.next() {
-        for capture in m.captures {
-            let capture_name = &query.capture_names()[capture.index as usize];
-            let Some(token_type) = capture_to_token_type(&capture_name) else { continue };
-            let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap_or(8) as u32;
+    while let Some((m, capture_index)) = qcaptures.next() {
+        let capture = &m.captures[*capture_index];
+        let capture_name = &query.capture_names()[capture.index as usize];
+        let Some(token_type) = capture_to_token_type(&capture_name) else { continue };
+        let ttype = SEMANTIC_TOKENS.iter().position(|t| t == &token_type).unwrap_or(8) as u32;
 
-            let start_position = capture.node.start_position();
-            let node_text = &text[capture.node.start_byte()..capture.node.end_byte()];
+        let start_position = capture.node.start_position();
+        let node_text = &text[capture.node.start_byte()..capture.node.end_byte()];
 
-            // multi-line nodes (block comments, strings) become one token per line
-            for (i, line_content) in node_text.lines().enumerate() {
-                if line_content.is_empty() { continue; }
+        // multi-line nodes (block comments, strings) become one token per line
+        for (i, line_content) in node_text.lines().enumerate() {
+            if line_content.is_empty() { continue; }
 
-                let mut row = start_position.row + i;
-                let mut column = if i == 0 { start_position.column } else { 0 };
-                if let Some(off) = offset {
-                    if row == 0 { column += off.column; }
-                    row += off.row;
-                }
-
-                tokens.push((row as u32, column as u32, line_content.len() as u32, ttype, 0));
+            let mut row = start_position.row + i;
+            let mut column = if i == 0 { start_position.column } else { 0 };
+            if let Some(off) = offset {
+                if row == 0 { column += off.column; }
+                row += off.row;
             }
+
+            tokens.push((row as u32, column as u32, line_content.len() as u32, ttype, 0));
         }
     }
     tokens
