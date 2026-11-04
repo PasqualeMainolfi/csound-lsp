@@ -201,6 +201,31 @@ impl Backend {
             }
         };
 
+        // Independent from Risset: also covers plugins missing from its index, or an offline start.
+        match resolve_pulgins::list_csound_opcodes().await {
+            Ok(listed) => {
+                self.client.log_message(MessageType::INFO, format!("[INFO] Opcodes listed by Csound: {}", listed.len())).await;
+
+                match resolve_pulgins::load_csound_plugins_repo_resources(&global_temp, &listed, &mut plugins_opcodes).await {
+                    Ok(added) => {
+                        self.client.log_message(MessageType::INFO, format!("[INFO] Opcodes from csound/plugins: {}", added)).await;
+                        if let Err(e) = resolve_pulgins::add_plugins_to_cs_references(&plugins_opcodes, &mut cs_references).await {
+                            self.client.log_message(MessageType::WARNING, format!("[WARNING] Plugins opcodes: {}", e)).await;
+                        }
+                    },
+                    Err(e) => {
+                        self.client.log_message(MessageType::WARNING, format!("[WARNING] Impossible to read csound/plugins: {}", e)).await;
+                    }
+                }
+
+                // last, so that manual and plugin entries keep their documentation
+                resolve_pulgins::add_listed_opcodes_to_cs_references(&listed, &mut cs_references);
+            },
+            Err(e) => {
+                self.client.log_message(MessageType::WARNING, format!("[WARNING] Opcodes listed by Csound: {}", e)).await;
+            }
+        };
+
         *self.opcodes.write().await = opcodes;
         *self.manual_temp_path.write().await = manual_path;
         *self.json_reference_completion_list.write().await = cs_references;
