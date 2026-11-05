@@ -41,6 +41,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # opcodes of the latest published Csound, embedded as the last-resort list (see the script)
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: List the opcodes of the latest Csound
+        shell: bash
+        run: |
+          npm install --no-save --no-package-lock @csound/browser@latest
+          node scripts/list_csound_opcodes.mjs
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 

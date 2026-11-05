@@ -178,24 +178,32 @@ pub struct NodeCollects<'a> {
     pub typed_vars: HashMap<String, String>,
     pub user_definitions: UserDefinitions,
     pub included_udo_files: HashMap<String, UdoFile>,
-    pub flags: HashMap<String, Node<'a>>
+    pub flags: HashMap<String, Node<'a>>,
+    // (flag, value) of the <CsOptions> flags that load plugins, e.g. ("--opcode-lib", "a.dylib,b.dylib")
+    pub plugin_flags: Vec<(String, String)>
 }
 
 impl<'a> NodeCollects<'a> {
-    fn new() -> Self {
+    fn new(plugin_types: &HashMap<String, UserDefinedType>) -> Self {
+        let mut user_definitions = UserDefinitions::new();
+        user_definitions.user_defined_types = plugin_types.clone();
         Self {
             opcodes: Vec::new(),
             udo: HashSet::new(),
             types: Vec::new(),
             generic_errors: Vec::new(),
-            udt: HashSet::new(),
+            udt: plugin_types.keys().cloned().collect(),
             typed_vars: HashMap::new(),
-            user_definitions: UserDefinitions::new(),
+            user_definitions,
             included_udo_files: HashMap::new(),
-            flags: HashMap::new()
+            flags: HashMap::new(),
+            plugin_flags: Vec::new()
         }
     }
 }
+
+// <CsOptions> flags whose value names plugins to load
+pub const PLUGIN_FLAGS: [&str; 2] = ["--opcode-lib", "--opcode-dir"];
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub enum Scope {
@@ -219,6 +227,8 @@ pub struct UserDefinedType {
     pub udt_name: String,
     pub udt_format: String,
     pub udt_members: Option<Vec<(String, String)>>,
+    // registered by a plugin and listed by `csound --list-structs`
+    pub from_plugin: bool
 }
 
 impl UserDefinedType {
@@ -226,7 +236,8 @@ impl UserDefinedType {
         Self {
             udt_name: String::new(),
             udt_format: String::new(),
-            udt_members: None
+            udt_members: None,
+            from_plugin: false
         }
     }
 }
@@ -695,7 +706,9 @@ impl UserDefinitions {
             local_udt.udt_members = Some(completion_items);
         }
 
-        if !self.user_defined_types.contains_key(&key.clone()) {
+        // a struct written in the file replaces a plugin type with the same name
+        let replaces_plugin_type = self.user_defined_types.get(key).is_some_and(|t| t.from_plugin);
+        if replaces_plugin_type || !self.user_defined_types.contains_key(&key.clone()) {
             local_udt.udt_name = key.clone();
             local_udt.udt_format = struct_format;
             self.user_defined_types.insert(key.clone(), local_udt);
@@ -905,10 +918,20 @@ pub fn iterate_tree<'a>(
     text: &String,
     uri: &Url
 ) -> NodeCollects<'a> {
+    iterate_tree_with_types(tree, text, uri, &HashMap::new())
+}
+
+// `plugin_types` are known before the file is read, as Csound registers them when it loads the plugins
+pub fn iterate_tree_with_types<'a>(
+    tree: &'a Tree,
+    text: &String,
+    uri: &Url,
+    plugin_types: &HashMap<String, UserDefinedType>
+) -> NodeCollects<'a> {
 
     let root_node = tree.root_node().walk();
     let mut to_visit = vec![root_node.node()];
-    let mut nodes_to_diagnostics = NodeCollects::new();
+    let mut nodes_to_diagnostics = NodeCollects::new(plugin_types);
     let mut flag_cabbage_start = 0;
     let mut flag_cabbage_ara_start = 0;
 
@@ -1247,7 +1270,17 @@ pub fn iterate_tree<'a>(
                                 get_node_name(fi, &text).unwrap_or_default(),
                                 get_node_name(ft, &text).unwrap_or_default()
                             );
-                            nodes_to_diagnostics.flags.insert(flag.trim().to_string(), child);
+                            let flag = flag.trim().to_string();
+                            if PLUGIN_FLAGS.contains(&flag.as_str()) {
+                                let value = child.child_by_field_name("flag_value")
+                                    .and_then(|v| get_node_name(v, &text))
+                                    .map(|v| v.trim_matches('"').to_string())
+                                    .filter(|v| !v.is_empty());
+                                if let Some(value) = value {
+                                    nodes_to_diagnostics.plugin_flags.push((flag.clone(), value));
+                                }
+                            }
+                            nodes_to_diagnostics.flags.insert(flag, child);
                         }
                     }
                 }
@@ -2092,4 +2125,31 @@ mod tests {
         assert!(decoded.contains(&(1, 12, 3, comment)), "{decoded:?}");
     }
 
+
+    #[test]
+    fn options_block_collects_plugin_flags() {
+        let text = "<CsoundSynthesizer>\n<CsOptions>\n-odac --opcode-lib=libs/a.dylib,/abs/b.dylib --opcode-dir=\"/my dir\" -d\n</CsOptions>\n<CsInstruments>\ninstr 1\nendin\n</CsInstruments>\n</CsoundSynthesizer>\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree(&parsed.tree, &text, &Url::parse("file:///test.csd").unwrap());
+        assert_eq!(nodes.plugin_flags, vec![
+            ("--opcode-lib".to_string(), "libs/a.dylib,/abs/b.dylib".to_string()),
+            ("--opcode-dir".to_string(), "/my dir".to_string())
+        ]);
+        assert!(nodes.flags.contains_key("--opcode-lib"), "plugin flags are still checked as flags");
+    }
+
+    #[test]
+    fn plugin_types_are_known_before_the_file_is_read() {
+        let mut udt = UserDefinedType::new();
+        udt.udt_name = "NoteTuplet".to_string();
+        udt.udt_members = Some(vec![("inote".to_string(), "i".to_string())]);
+        udt.from_plugin = true;
+        let types = HashMap::from([(udt.udt_name.clone(), udt)]);
+
+        let text = "instr 1\n  note:NoteTuplet init 60\nendin\n".to_string();
+        let parsed = parse_doc(&text, None);
+        let nodes = iterate_tree_with_types(&parsed.tree, &text, &Url::parse("file:///test.orc").unwrap(), &types);
+        assert!(nodes.udt.contains("NoteTuplet"));
+        assert!(nodes.user_definitions.user_defined_types["NoteTuplet"].from_plugin);
+    }
 }

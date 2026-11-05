@@ -605,6 +605,7 @@ pub fn complete(src: &CompletionSources, pos: &Position, context: Option<&Comple
 mod tests {
     use super::*;
     use crate::assets::{ BodyOpCompletion, OpcodesData, OMacro };
+    use crate::parser::UserDefinedType;
 
     struct Doc {
         text: String,
@@ -626,6 +627,10 @@ mod tests {
 
     // `|` marks the cursor
     fn doc(file_name: &str, marked: &str) -> (Doc, Position) {
+        doc_with_types(file_name, marked, &HashMap::new())
+    }
+
+    fn doc_with_types(file_name: &str, marked: &str, plugin_types: &HashMap<String, UserDefinedType>) -> (Doc, Position) {
         let offset = marked.find('|').unwrap();
         let text = marked.replacen('|', "", 1);
         let before = &text[..offset];
@@ -635,7 +640,7 @@ mod tests {
         let uri = Url::parse(&format!("file:///tmp/{}", file_name)).unwrap();
         let parsed = parser::parse_doc(&text, None);
         let (typed_vars, definitions) = {
-            let nodes = parser::iterate_tree(&parsed.tree, &text, &uri);
+            let nodes = parser::iterate_tree_with_types(&parsed.tree, &text, &uri, plugin_types);
             (nodes.typed_vars, nodes.user_definitions)
         };
 
@@ -660,7 +665,11 @@ mod tests {
     }
 
     fn labels(file_name: &str, marked: &str, kind: CompletionTriggerKind) -> Option<Vec<String>> {
-        let (d, pos) = doc(file_name, marked);
+        labels_with_types(file_name, marked, kind, &HashMap::new())
+    }
+
+    fn labels_with_types(file_name: &str, marked: &str, kind: CompletionTriggerKind, plugin_types: &HashMap<String, UserDefinedType>) -> Option<Vec<String>> {
+        let (d, pos) = doc_with_types(file_name, marked, plugin_types);
         let included = HashMap::new();
         let src = CompletionSources {
             text: &d.text,
@@ -745,6 +754,31 @@ mod tests {
     fn struct_members_after_dot() {
         let got = invoked("a.orc", "struct Pt x:k, y:k\ninstr 1\n  p:Pt init 0, 0\n  kv = p.|\nendin\n").unwrap();
         assert_eq!(got, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    fn plugin_types() -> HashMap<String, UserDefinedType> {
+        let udt = crate::resolve_pulgins::parse_struct_line("struct CabbageNumTrig val:k, trig:k").unwrap();
+        HashMap::from([(udt.udt_name.clone(), udt)])
+    }
+
+    #[test]
+    fn plugin_struct_members_after_dot() {
+        let marked = "instr 1\n  res:CabbageNumTrig init 0, 0\n  kv = res.|\nendin\n";
+        let got = labels_with_types("a.orc", marked, CompletionTriggerKind::INVOKED, &plugin_types()).unwrap();
+        assert_eq!(got, vec!["trig".to_string(), "val".to_string()]);
+    }
+
+    #[test]
+    fn plugin_types_after_colon() {
+        let got = labels_with_types("a.orc", "instr 1\n  kv:|\nendin\n", CompletionTriggerKind::INVOKED, &plugin_types()).unwrap();
+        assert!(got.contains(&"CabbageNumTrig".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn a_struct_in_the_file_replaces_a_plugin_type() {
+        let marked = "struct CabbageNumTrig other:k\ninstr 1\n  res:CabbageNumTrig init 0\n  kv = res.|\nendin\n";
+        let got = labels_with_types("a.orc", marked, CompletionTriggerKind::INVOKED, &plugin_types()).unwrap();
+        assert_eq!(got, vec!["other".to_string()]);
     }
 
     #[test]

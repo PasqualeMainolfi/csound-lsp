@@ -18,6 +18,10 @@ use std::{
 
 const GLOBAL_TEMP_DIR: &str = "csound-lsp_temp_folder";
 
+fn listing_cache_dir() -> PathBuf {
+    std::env::temp_dir().join(GLOBAL_TEMP_DIR)
+}
+
 pub struct CurrentDocument {
     pub text: Rope,
     pub doc_type: parser::TreeType,
@@ -27,6 +31,8 @@ pub struct CurrentDocument {
     pub cached_included_udo_files: HashMap<String, resolve_udos::UdoFile>,
     // behind a mutex so that read-only requests (semantic tokens) can use them
     pub internal_parsers: Mutex<parser::InternalParsers>,
+    // --opcode-lib / --opcode-dir of its <CsOptions>, with the paths resolved
+    pub plugin_args: Vec<String>
 }
 
 impl CurrentDocument {
@@ -40,7 +46,8 @@ impl CurrentDocument {
             user_definitions: parser::UserDefinitions::new(),
             cached_typed_vars: HashMap::new(),
             cached_included_udo_files: HashMap::new(),
-            internal_parsers: Mutex::new(parsers)
+            internal_parsers: Mutex::new(parsers),
+            plugin_args: Vec::new()
         }
     }
 
@@ -131,7 +138,43 @@ pub struct Backend {
     plugins_opcodes: Arc<RwLock<HashMap<String, resolve_pulgins::CsoundPlugin>>>,
     queries: Arc<RwLock<parser::Queries>>,
     // manual and plugins are loaded in the background after `initialized`
-    resources_ready: Arc<AtomicBool>
+    resources_ready: Arc<AtomicBool>,
+    settings: Arc<RwLock<CsoundSettings>>,
+    // types registered by the plugins, from `csound --list-structs`
+    plugin_types: Arc<RwLock<resolve_pulgins::ListedStructs>>,
+    // executable and plugin arguments of the last listing, so that Csound runs again only when they change
+    listed_with: Arc<RwLock<Option<(String, Vec<String>)>>>,
+    listing_lock: Arc<tokio::sync::Mutex<()>>
+}
+
+// How the user runs Csound: from `initializationOptions` and `workspace/didChangeConfiguration`,
+// both shaped as `{ "csound": { "executable": "csound", "playArgs": ["-odac", "--opcode-lib=..."] } }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CsoundSettings {
+    pub executable: String,
+    pub plugin_args: Vec<String>
+}
+
+impl Default for CsoundSettings {
+    fn default() -> Self {
+        Self { executable: "csound".to_string(), plugin_args: Vec::new() }
+    }
+}
+
+impl CsoundSettings {
+    pub fn from_json(value: Option<&Value>) -> Self {
+        let mut settings = Self::default();
+        let Some(csound) = value.and_then(|v| v.get("csound")) else { return settings };
+
+        if let Some(executable) = csound.get("executable").and_then(Value::as_str).map(str::trim).filter(|e| !e.is_empty()) {
+            settings.executable = executable.to_string();
+        }
+        if let Some(args) = csound.get("playArgs").and_then(Value::as_array) {
+            let args: Vec<String> = args.iter().filter_map(Value::as_str).map(str::to_string).collect();
+            settings.plugin_args = resolve_pulgins::plugin_args_from_cli(&args);
+        }
+        settings
+    }
 }
 
 impl Backend {
@@ -145,7 +188,11 @@ impl Backend {
             manual_temp_path: Arc::new(RwLock::new(PathBuf::new())),
             plugins_opcodes: Arc::new(RwLock::new(HashMap::new())),
             queries: Arc::new(RwLock::new(queries)),
-            resources_ready: Arc::new(AtomicBool::new(false))
+            resources_ready: Arc::new(AtomicBool::new(false)),
+            settings: Arc::new(RwLock::new(CsoundSettings::default())),
+            plugin_types: Arc::new(RwLock::new(HashMap::new())),
+            listed_with: Arc::new(RwLock::new(None)),
+            listing_lock: Arc::new(tokio::sync::Mutex::new(()))
         }
     }
 }
@@ -202,9 +249,12 @@ impl Backend {
         };
 
         // Independent from Risset: also covers plugins missing from its index, or an offline start.
-        match resolve_pulgins::list_csound_opcodes().await {
-            Ok(listed) => {
-                self.client.log_message(MessageType::INFO, format!("[INFO] Opcodes listed by Csound: {}", listed.len())).await;
+        let settings = self.settings.read().await.clone();
+        match self.list_csound(&settings, &settings.plugin_args).await {
+            Some(listing) => {
+                let listed = listing.opcodes;
+                *self.plugin_types.write().await = listing.structs;
+                *self.listed_with.write().await = Some((settings.executable.clone(), settings.plugin_args.clone()));
 
                 match resolve_pulgins::load_csound_plugins_repo_resources(&global_temp, &listed, &mut plugins_opcodes).await {
                     Ok(added) => {
@@ -219,10 +269,19 @@ impl Backend {
                 }
 
                 // last, so that manual and plugin entries keep their documentation
-                resolve_pulgins::add_listed_opcodes_to_cs_references(&listed, &mut cs_references);
+                resolve_pulgins::add_listed_opcodes_to_cs_references(&listed, resolve_pulgins::INSTALLED_CSOUND, &mut cs_references);
             },
-            Err(e) => {
-                self.client.log_message(MessageType::WARNING, format!("[WARNING] Opcodes listed by Csound: {}", e)).await;
+            None => {
+                // opcodes without a manual page (printfi, eventi, ...) must not look unknown:
+                // the last listing of the installed Csound, else the list bundled with the server
+                let (source, listed) = match resolve_pulgins::load_listing_cache(&listing_cache_dir()) {
+                    Some(cached) => cached,
+                    None => resolve_pulgins::bundled_opcodes()
+                };
+                self.client.log_message(MessageType::INFO,
+                    format!("[INFO] Using the opcode list of {}: {} opcodes", source, listed.len())
+                ).await;
+                resolve_pulgins::add_listed_opcodes_to_cs_references(&listed, &source, &mut cs_references);
             }
         };
 
@@ -240,12 +299,83 @@ impl Backend {
         }
     }
 
+    // Lists opcodes and plugin types; a wrong plugin path makes Csound fail, so it then lists without them.
+    async fn list_csound(&self, settings: &CsoundSettings, plugin_args: &[String]) -> Option<resolve_pulgins::CsoundListing> {
+        let mut result = resolve_pulgins::list_csound(&settings.executable, plugin_args).await;
+        if let Err(ref e) = result {
+            if !plugin_args.is_empty() {
+                self.client.log_message(MessageType::WARNING,
+                    format!("[WARNING] Csound could not load the plugins in {:?} ({}): listing without them", plugin_args, e)
+                ).await;
+                result = resolve_pulgins::list_csound(&settings.executable, &[]).await;
+            }
+        }
+
+        match result {
+            Ok(listing) => {
+                if let Err(e) = resolve_pulgins::save_listing_cache(&listing_cache_dir(), &listing.opcodes) {
+                    self.client.log_message(MessageType::WARNING, format!("[WARNING] Opcode list not cached: {}", e)).await;
+                }
+                self.client.log_message(MessageType::INFO, format!(
+                    "[INFO] Listed by Csound: {} opcodes, {} plugin types{}",
+                    listing.opcodes.len(),
+                    listing.structs.len(),
+                    if plugin_args.is_empty() { String::new() } else { format!(" (with {:?})", plugin_args) }
+                )).await;
+                Some(listing)
+            },
+            Err(e) => {
+                self.client.log_message(MessageType::WARNING, format!("[WARNING] Opcodes listed by Csound: {}", e)).await;
+                None
+            }
+        }
+    }
+
+    // Plugin flags from the settings and from the <CsOptions> of every open document.
+    async fn wanted_plugin_args(&self) -> Vec<String> {
+        let mut args = self.settings.read().await.plugin_args.clone();
+        for doc in self.document_state.read().await.values() {
+            args.extend(doc.plugin_args.iter().cloned());
+        }
+        args.sort();
+        args.dedup();
+        args
+    }
+
+    // Asks Csound again when the plugin flags change, so that their opcodes and types are known.
+    async fn refresh_csound_listing(&self) {
+        if !self.resources_ready.load(Ordering::SeqCst) { return; } // the first listing is still running
+
+        let _guard = self.listing_lock.lock().await;
+        let wanted = self.wanted_plugin_args().await;
+        let settings = self.settings.read().await.clone();
+        let key = (settings.executable.clone(), wanted.clone());
+        if self.listed_with.read().await.as_ref() == Some(&key) { return; }
+
+        // recorded even if it fails, so that a wrong path is not retried on every save
+        *self.listed_with.write().await = Some(key);
+        let Some(listing) = self.list_csound(&settings, &wanted).await else { return; };
+
+        {
+            let mut references = self.json_reference_completion_list.write().await;
+            resolve_pulgins::add_listed_opcodes_to_cs_references(&listing.opcodes, resolve_pulgins::INSTALLED_CSOUND, &mut references);
+        }
+        *self.plugin_types.write().await = listing.structs;
+        self.analyze_open_documents().await;
+    }
+
+    fn spawn_listing_refresh(&self) {
+        let backend = self.clone();
+        tokio::spawn(async move { backend.refresh_csound_listing().await; });
+    }
+
     // Re-analyses a document after it has been (re)parsed and publishes its diagnostics.
     async fn analyze_document(&self, uri: Url) {
         let mut d = self.document_state.write().await;
         let opcodes = self.opcodes.read().await;
         let plugins = self.plugins_opcodes.read().await;
         let jr = self.json_reference_completion_list.read().await;
+        let plugin_types = self.plugin_types.read().await;
 
         // without the manual every opcode and flag would look unknown
         let resources_ready = self.resources_ready.load(Ordering::SeqCst);
@@ -254,9 +384,11 @@ impl Backend {
         let mut cached_diag: HashSet<(u32, u32, u32, u32, String)> = HashSet::new();
         if let Some(doc) = d.get_mut(&uri) {
             let text = doc.text.to_string();
-            let nodes_to_diagnostics = parser::iterate_tree(&doc.tree, &text, &uri);
+            let nodes_to_diagnostics = parser::iterate_tree_with_types(&doc.tree, &text, &uri, &plugin_types);
             doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
             doc.user_definitions = nodes_to_diagnostics.user_definitions;
+            let doc_dir = uri.to_file_path().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+            doc.plugin_args = resolve_pulgins::plugin_args_from_options(&nodes_to_diagnostics.plugin_flags, doc_dir.as_deref());
 
             for (flag, flag_node) in nodes_to_diagnostics.flags.iter().filter(|_| resources_ready) {
                 if let Some(ref flags) = jr.oflag_data {
@@ -555,11 +687,19 @@ impl Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        *self.settings.write().await = CsoundSettings::from_json(params.initialization_options.as_ref());
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::INCREMENTAL)),
+                text_document_sync: Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
+                    open_close: Some(true),
+                    change: Some(TextDocumentSyncKind::INCREMENTAL),
+                    // <CsOptions> plugin flags are read again on save, not while typing a path
+                    save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                    ..Default::default()
+                })),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
                     trigger_characters: Some(vec![
@@ -616,6 +756,8 @@ impl LanguageServer for Backend {
             backend.load_resources().await;
             backend.client.log_message(MessageType::INFO, "[INFO] Csound resources loaded").await;
             backend.analyze_open_documents().await;
+            // documents opened meanwhile may load plugins in their <CsOptions>
+            backend.refresh_csound_listing().await;
         });
     }
 
@@ -628,6 +770,24 @@ impl LanguageServer for Backend {
         let doc = CurrentDocument::new(&params.text_document.text);
         self.document_state.write().await.insert(uri.clone(), doc);
         self.analyze_document(uri).await;
+        self.spawn_listing_refresh();
+    }
+
+    async fn did_save(&self, _: DidSaveTextDocumentParams) {
+        self.spawn_listing_refresh();
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        let settings = CsoundSettings::from_json(Some(&params.settings));
+        let changed = {
+            let mut current = self.settings.write().await;
+            let changed = *current != settings;
+            *current = settings;
+            changed
+        };
+        if changed {
+            self.spawn_listing_refresh();
+        }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -710,7 +870,8 @@ impl LanguageServer for Backend {
                         if is_type {
                             if let Some(child_type_name) = parser::get_node_name(node, &doc.text.to_string()) {
                                 if let Some(sd) = doc.user_definitions.user_defined_types.get(&child_type_name) {
-                                    let md = format!("## User-Defined Type\n```csound\n{}\n```", sd.udt_format);
+                                    let title = if sd.from_plugin { "Plugin Type" } else { "User-Defined Type" };
+                                    let md = format!("## {}\n```csound\n{}\n```", title, sd.udt_format);
                                     return Ok(Some(utils::hover_helper(md)))
                                 }
 
@@ -995,5 +1156,20 @@ mod tests {
 
         let edit = indent_edit(&doc.text, &doc.tree, line, &options(4, true)).unwrap();
         assert_eq!((edit.range.end.character, edit.new_text.as_str()), (2, "    "));
+    }
+
+    #[test]
+    fn settings_keep_the_executable_and_the_plugin_flags() {
+        let json = serde_json::json!({ "csound": {
+            "executable": "/opt/csound/bin/csound",
+            "playArgs": ["-odac", "--opcode-lib=/a/x.dylib"]
+        }});
+        let settings = CsoundSettings::from_json(Some(&json));
+        assert_eq!(settings.executable, "/opt/csound/bin/csound");
+        assert_eq!(settings.plugin_args, vec!["--opcode-lib=/a/x.dylib".to_string()]);
+
+        let defaults = CsoundSettings::from_json(Some(&serde_json::json!({ "isOnWeb": false })));
+        assert_eq!(defaults, CsoundSettings::default());
+        assert_eq!(CsoundSettings::from_json(None).executable, "csound");
     }
 }

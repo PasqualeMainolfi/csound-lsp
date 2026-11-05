@@ -1,7 +1,9 @@
 #![allow(unused)]
 
 use crate::{
-    assets::{ self, OpcodesData }, utils::{ GitHubEntry, PVersion, PVersionAge, parse_plugins_git_url }
+    assets::{ self, OpcodesData },
+    parser::{ self, UserDefinedType },
+    utils::{ GitHubEntry, PVersion, PVersionAge, parse_plugins_git_url }
 };
 use std::{
     collections::{ HashMap, HashSet },
@@ -552,22 +554,39 @@ pub async fn add_plugins_to_cs_references(plugins: &HashMap<String, CsoundPlugin
 // opcode name -> (outputs, inputs), one entry per overload
 pub type ListedOpcodes = HashMap<String, Vec<(String, String)>>;
 
+// struct name -> type, as registered by the plugins Csound loads
+pub type ListedStructs = HashMap<String, UserDefinedType>;
+
+pub struct CsoundListing {
+    pub opcodes: ListedOpcodes,
+    pub structs: ListedStructs
+}
+
 // Asks the installed Csound what it can load, so plugins missing from the Risset index are known too.
-pub async fn list_csound_opcodes() -> Result<ListedOpcodes, Box<dyn std::error::Error + Send + Sync>> {
-    let command = tokio::process::Command::new("csound")
-        .arg("--list-opcodes1")
+// `plugin_args` are the --opcode-lib / --opcode-dir flags the user runs Csound with.
+pub async fn list_csound(executable: &str, plugin_args: &[String]) -> Result<CsoundListing, Box<dyn std::error::Error + Send + Sync>> {
+    // Csound releases before the deferred listing print the opcodes while decoding the options:
+    // --list-opcodes1 comes before --list-structs so that they still print the opcodes,
+    // and the plugin flags come first so that --opcode-dir is applied before the list on those too.
+    let command = tokio::process::Command::new(executable)
+        .args(plugin_args)
+        .args(["--list-opcodes1", "--list-structs"])
         .stdin(Stdio::null())
         .kill_on_drop(true) // a plugin hanging while it loads must not outlive the timeout
         .output();
 
     let output = tokio::time::timeout(LIST_OPCODES_TIMEOUT, command)
         .await
-        .map_err(|_| "csound --list-opcodes1 timed out")??;
+        .map_err(|_| format!("{} --list-opcodes1 timed out", executable))??;
 
-    // Csound prints the list on stderr and always exits with an error (no orchestra name),
-    // so the exit code says nothing: only the closing count line proves the list is complete.
-    parse_opcode_list(&String::from_utf8_lossy(&output.stderr))
-        .ok_or_else(|| "Can't parse the output of csound --list-opcodes1".into())
+    // Csound prints the lists on stderr, and older releases exit with an error (no orchestra name),
+    // so the exit code says nothing: only the closing count line proves a list is complete.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let opcodes = parse_opcode_list(&stderr)
+        .ok_or_else(|| format!("Can't parse the output of {} --list-opcodes1", executable))?;
+    // releases without --list-structs simply have no structs to offer
+    let structs = parse_struct_list(&stderr).unwrap_or_default();
+    Ok(CsoundListing { opcodes, structs })
 }
 
 fn is_opcode_name(name: &str) -> bool {
@@ -575,23 +594,108 @@ fn is_opcode_name(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn is_count_line(columns: &[&str], what: &str) -> bool {
+    matches!(columns, [count, w] if *w == what && count.chars().all(|c| c.is_ascii_digit()))
+}
+
 fn parse_opcode_list(list: &str) -> Option<ListedOpcodes> {
     let mut opcodes = ListedOpcodes::new();
     for line in list.lines() {
         let columns: Vec<&str> = line.split_whitespace().collect();
-        match columns.as_slice() {
-            [count, "opcodes"] if count.chars().all(|c| c.is_ascii_digit()) => return Some(opcodes),
-            [name, outputs, inputs] if is_opcode_name(name) => {
-                opcodes.entry(name.to_string()).or_default().push((outputs.to_string(), inputs.to_string()));
-            },
-            _ => { }
+        if is_count_line(&columns, "opcodes") {
+            return Some(opcodes);
+        }
+        if let [name, outputs, inputs] = columns.as_slice() {
+            if is_opcode_name(name) {
+                let signature = (outputs.to_string(), inputs.to_string());
+                // a library loaded twice repeats its entries
+                let signatures = opcodes.entry(name.to_string()).or_default();
+                if !signatures.contains(&signature) {
+                    signatures.push(signature);
+                }
+            }
         }
     }
     None
 }
 
-fn listed_opcode_description(signatures: &[(String, String)]) -> String {
-    let mut description = String::from("Opcode listed by the installed Csound (outputs, inputs):");
+// `struct Name a:i, b:Other[]` lines, closed by `N structs`
+fn parse_struct_list(list: &str) -> Option<ListedStructs> {
+    let mut structs = ListedStructs::new();
+    for line in list.lines() {
+        let line = line.trim();
+        if is_count_line(&line.split_whitespace().collect::<Vec<_>>(), "structs") {
+            return Some(structs);
+        }
+        if let Some(udt) = parse_struct_line(line) {
+            structs.insert(udt.udt_name.clone(), udt);
+        }
+    }
+    None
+}
+
+pub(crate) fn parse_struct_line(line: &str) -> Option<UserDefinedType> {
+    let (name, members) = line.strip_prefix("struct ")?.trim().split_once(char::is_whitespace)?;
+    if !is_opcode_name(name) { return None; }
+
+    let members = members
+        .split(',')
+        .map(|member| {
+            let (member_name, member_type) = member.trim().split_once(':')?;
+            let (member_name, member_type) = (member_name.trim(), member_type.trim());
+            (is_opcode_name(member_name) && !member_type.is_empty())
+                .then(|| (member_name.to_string(), member_type.to_string()))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if members.is_empty() { return None; }
+
+    let mut udt = UserDefinedType::new();
+    udt.udt_name = name.to_string();
+    udt.udt_format = line.to_string();
+    udt.udt_members = Some(members);
+    udt.from_plugin = true;
+    Some(udt)
+}
+
+// Keeps the flags that load plugins from the arguments the user runs Csound with (e.g. `csound.playArgs`).
+pub fn plugin_args_from_cli(args: &[String]) -> Vec<String> {
+    args.iter()
+        .map(|arg| arg.trim())
+        .filter(|arg| parser::PLUGIN_FLAGS.iter().any(|flag| {
+            arg.strip_prefix(flag).is_some_and(|value| value.len() > 1 && value.starts_with('='))
+        }))
+        .map(str::to_string)
+        .collect()
+}
+
+// Turns the plugin flags of <CsOptions> into arguments. Csound resolves relative paths from its
+// working directory, which is the folder of the file when the editor runs it.
+pub fn plugin_args_from_options(flags: &[(String, String)], base_dir: Option<&Path>) -> Vec<String> {
+    let resolve = |path: &str| -> String {
+        let path = path.trim();
+        match base_dir {
+            Some(dir) if Path::new(path).is_relative() => dir.join(path).to_string_lossy().to_string(),
+            _ => path.to_string()
+        }
+    };
+
+    flags.iter()
+        .map(|(flag, value)| {
+            let value = if flag == "--opcode-lib" {
+                // a comma separated list of libraries
+                value.split(',').filter(|lib| !lib.trim().is_empty()).map(resolve).collect::<Vec<_>>().join(",")
+            } else {
+                resolve(value)
+            };
+            format!("{}={}", flag, value)
+        })
+        .collect()
+}
+
+pub const INSTALLED_CSOUND: &str = "the installed Csound";
+
+fn listed_opcode_description(source: &str, signatures: &[(String, String)]) -> String {
+    let mut description = format!("Opcode listed by {} (outputs, inputs):", source);
     for (outputs, inputs) in signatures.iter().take(MAX_LISTED_SIGNATURES) {
         description.push_str(&format!("\n{} {}", outputs, inputs));
     }
@@ -602,7 +706,8 @@ fn listed_opcode_description(signatures: &[(String, String)]) -> String {
 }
 
 // Entries from the manual and from Risset are richer, so they are never replaced.
-pub fn add_listed_opcodes_to_cs_references(listed: &ListedOpcodes, cs_references: &mut assets::CsoundJsonData) {
+// `source` names where the list comes from, for the completion documentation.
+pub fn add_listed_opcodes_to_cs_references(listed: &ListedOpcodes, source: &str, cs_references: &mut assets::CsoundJsonData) {
     let opdata = cs_references.opcodes_data.get_or_insert_with(HashMap::new);
     for (opcode, signatures) in listed {
         // one-letter names are type casts (B, b), not opcodes to suggest
@@ -610,9 +715,48 @@ pub fn add_listed_opcodes_to_cs_references(listed: &ListedOpcodes, cs_references
         opdata.entry(opcode.clone()).or_insert_with(|| OpcodesData {
             prefix: opcode.clone(),
             body: assets::BodyOpCompletion::SingleLine(opcode.clone()),
-            description: listed_opcode_description(signatures)
+            description: listed_opcode_description(source, signatures)
         });
     }
+}
+
+// The opcodes of the latest published Csound, written by scripts/list_csound_opcodes.mjs at release time.
+// Last resort when neither the installed Csound nor a cached listing is available,
+// so that opcodes without a manual page are still known.
+const BUNDLED_OPCODES: &str = include_str!("../resources/csound_opcodes.json");
+
+// Same shape for the bundled list and for the cache of the last listing of the installed Csound.
+#[derive(Deserialize, Serialize)]
+struct OpcodeList {
+    generated_with: String,
+    opcodes: ListedOpcodes
+}
+
+// (source, opcodes), source being e.g. "Csound 7.0.0"
+pub fn bundled_opcodes() -> (String, ListedOpcodes) {
+    serde_json::from_str::<OpcodeList>(BUNDLED_OPCODES)
+        .map(|list| (list.generated_with, list.opcodes))
+        .unwrap_or_default()
+}
+
+const LISTING_CACHE: &str = "csound_opcodes_cache.json";
+
+// Keeps the last listing of the installed Csound, for when it can't be asked on a later start
+// (e.g. an editor started without the PATH of the shell).
+pub fn save_listing_cache(dir: &Path, opcodes: &ListedOpcodes) -> std::io::Result<()> {
+    let list = OpcodeList { generated_with: INSTALLED_CSOUND.to_string(), opcodes: opcodes.clone() };
+    std::fs::create_dir_all(dir)?;
+    // written aside and renamed, so that a crash never leaves half a file
+    let temp = dir.join(format!("{}.tmp", LISTING_CACHE));
+    std::fs::write(&temp, serde_json::to_vec(&list)?)?;
+    std::fs::rename(temp, dir.join(LISTING_CACHE))
+}
+
+// (source, opcodes) of the last listing saved by save_listing_cache
+pub fn load_listing_cache(dir: &Path) -> Option<(String, ListedOpcodes)> {
+    let text = std::fs::read_to_string(dir.join(LISTING_CACHE)).ok()?;
+    let list = serde_json::from_str::<OpcodeList>(&text).ok()?;
+    (!list.opcodes.is_empty()).then(|| (format!("{} (last listing)", list.generated_with), list.opcodes))
 }
 
 #[cfg(test)]
@@ -658,7 +802,7 @@ Usage:      csound [-flags] orchfile scorefile
             description: "from risset".to_string()
         })]));
 
-        add_listed_opcodes_to_cs_references(&parse_opcode_list(LISTING).unwrap(), &mut references);
+        add_listed_opcodes_to_cs_references(&parse_opcode_list(LISTING).unwrap(), INSTALLED_CSOUND, &mut references);
 
         let opcodes = references.opcodes_data.unwrap();
         assert_eq!(opcodes["beosc"].description, "from risset");
@@ -669,7 +813,7 @@ Usage:      csound [-flags] orchfile scorefile
     #[test]
     fn listed_opcodes_work_without_the_manual_data() {
         let mut references = assets::CsoundJsonData::default();
-        add_listed_opcodes_to_cs_references(&parse_opcode_list(LISTING).unwrap(), &mut references);
+        add_listed_opcodes_to_cs_references(&parse_opcode_list(LISTING).unwrap(), INSTALLED_CSOUND, &mut references);
         assert!(references.opcodes_data.unwrap().contains_key("beosc"));
     }
 
@@ -700,8 +844,96 @@ Usage:      csound [-flags] orchfile scorefile
     #[test]
     fn long_overload_lists_are_truncated() {
         let signatures = vec![("a".to_string(), "k".to_string()); MAX_LISTED_SIGNATURES + 2];
-        let description = listed_opcode_description(&signatures);
+        let description = listed_opcode_description(INSTALLED_CSOUND, &signatures);
         assert_eq!(description.matches("\na k").count(), MAX_LISTED_SIGNATURES);
         assert!(description.ends_with("... and 2 more"));
+    }
+
+    #[test]
+    fn bundled_list_knows_opcodes_without_a_manual_page() {
+        let (source, opcodes) = bundled_opcodes();
+        assert!(source.starts_with("Csound 7"), "{source}");
+        assert!(opcodes.len() > 1000);
+        for opcode in ["printf", "printfi", "eventi", "oscil"] {
+            assert!(opcodes.contains_key(opcode), "{opcode} missing from resources/csound_opcodes.json");
+        }
+        assert!(opcodes.keys().all(|name| is_opcode_name(name)), "internal names like poscil3.a must be cut at the dot");
+
+        let mut references = assets::CsoundJsonData::default();
+        add_listed_opcodes_to_cs_references(&opcodes, &source, &mut references);
+        assert!(references.opcodes_data.unwrap()["printfi"].description.starts_with(&format!("Opcode listed by {}", source)));
+    }
+
+    const STRUCT_LISTING: &str = "\
+2 opcodes
+
+struct NoteTuplet inote:i, ivelocity:i
+struct Group note:NoteTuplet, notes:NoteTuplet[], values:k[]
+struct broken
+2 structs
+";
+
+    #[test]
+    fn parses_plugin_structs_until_the_count_line() {
+        let structs = parse_struct_list(STRUCT_LISTING).unwrap();
+        assert_eq!(structs.len(), 2);
+        let group = &structs["Group"];
+        assert!(group.from_plugin);
+        assert_eq!(group.udt_format, "struct Group note:NoteTuplet, notes:NoteTuplet[], values:k[]");
+        assert_eq!(group.udt_members.as_ref().unwrap(), &vec![
+            ("note".to_string(), "NoteTuplet".to_string()),
+            ("notes".to_string(), "NoteTuplet[]".to_string()),
+            ("values".to_string(), "k[]".to_string())
+        ]);
+    }
+
+    #[test]
+    fn a_csound_without_list_structs_gives_no_structs() {
+        assert!(parse_struct_list(LISTING).is_none());
+        assert!(parse_struct_list("Csound Command ERROR: unknown flag --list-structs\n").is_none());
+    }
+
+    #[test]
+    fn repeated_signatures_are_kept_once() {
+        let listed = parse_opcode_list("accum a koO\naccum k koO\naccum a koO\n3 opcodes\n").unwrap();
+        assert_eq!(listed["accum"], vec![
+            ("a".to_string(), "koO".to_string()),
+            ("k".to_string(), "koO".to_string())
+        ]);
+    }
+
+    #[test]
+    fn only_plugin_flags_are_taken_from_the_play_arguments() {
+        let args: Vec<String> = ["-odac", "--opcode-lib=/a/x.dylib", "--opcode-dir=/plugins", "--opcode-lib=", "--opcode-libs=/b", "-m0"]
+            .iter().map(|a| a.to_string()).collect();
+        assert_eq!(plugin_args_from_cli(&args), vec!["--opcode-lib=/a/x.dylib".to_string(), "--opcode-dir=/plugins".to_string()]);
+    }
+
+    #[test]
+    fn relative_plugin_paths_are_resolved_from_the_file_folder() {
+        let flags = vec![
+            ("--opcode-lib".to_string(), "libs/a.dylib,/abs/b.dylib".to_string()),
+            ("--opcode-dir".to_string(), "plugins".to_string())
+        ];
+        let base = Path::new("/project");
+        assert_eq!(plugin_args_from_options(&flags, Some(base)), vec![
+            format!("--opcode-lib={},/abs/b.dylib", base.join("libs/a.dylib").display()),
+            format!("--opcode-dir={}", base.join("plugins").display())
+        ]);
+        assert_eq!(plugin_args_from_options(&flags[1..], None), vec!["--opcode-dir=plugins".to_string()]);
+    }
+
+    #[test]
+    fn the_last_listing_is_cached_for_the_next_start() {
+        let dir = env::temp_dir().join(format!("csound-lsp-cache-test-{}", process::id()));
+        assert!(load_listing_cache(&dir).is_none());
+
+        let listed = parse_opcode_list(LISTING).unwrap();
+        save_listing_cache(&dir, &listed).unwrap();
+        let (source, cached) = load_listing_cache(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(cached, listed);
+        assert_eq!(source, format!("{} (last listing)", INSTALLED_CSOUND));
     }
 }
