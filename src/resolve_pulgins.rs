@@ -8,7 +8,7 @@ use crate::{
 use std::{
     collections::{ HashMap, HashSet },
     path::{ Path, PathBuf },
-    time::Duration,
+    time::{ Duration, SystemTime },
     env,
     process::{ self, Stdio }
 };
@@ -692,6 +692,41 @@ pub fn plugin_args_from_options(flags: &[(String, String)], base_dir: Option<&Pa
         .collect()
 }
 
+// The executable as the shell would find it: a bare name is looked up in PATH.
+fn resolve_executable(executable: &str) -> Option<PathBuf> {
+    let path = Path::new(executable);
+    if path.components().count() > 1 {
+        return Some(path.to_path_buf());
+    }
+    let names: Vec<String> = if cfg!(windows) && path.extension().is_none() {
+        vec![format!("{}.exe", executable), executable.to_string()]
+    } else {
+        vec![executable.to_string()]
+    };
+    env::split_paths(&env::var_os("PATH")?)
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+// Last change of the executable and of every library or folder named by the plugin flags.
+// The listing is done again when one of them changes: a Csound update, a rebuilt plugin.
+pub type ListingStamps = Vec<Option<SystemTime>>;
+
+pub fn listing_stamps(executable: &str, plugin_args: &[String]) -> ListingStamps {
+    let mut stamps = vec![resolve_executable(executable).and_then(|p| modified(&p))];
+    for arg in plugin_args {
+        if let Some((flag, value)) = arg.split_once('=') {
+            let paths: Vec<&str> = if flag == "--opcode-lib" { value.split(',').collect() } else { vec![value] };
+            stamps.extend(paths.iter().map(|p| modified(Path::new(p.trim()))));
+        }
+    }
+    stamps
+}
+
 pub const INSTALLED_CSOUND: &str = "the installed Csound";
 
 fn listed_opcode_description(source: &str, signatures: &[(String, String)]) -> String {
@@ -921,6 +956,34 @@ struct broken
             format!("--opcode-dir={}", base.join("plugins").display())
         ]);
         assert_eq!(plugin_args_from_options(&flags[1..], None), vec!["--opcode-dir=plugins".to_string()]);
+    }
+
+    #[test]
+    fn listing_stamps_change_when_a_plugin_library_changes() {
+        let dir = env::temp_dir().join(format!("csound-lsp-stamps-test-{}", process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = dir.join("libx.dylib");
+        let args = vec![format!("--opcode-lib={},/missing/liby.dylib", lib.display())];
+
+        let missing = listing_stamps("/missing/csound", &args);
+        assert_eq!(missing, vec![None, None, None]);
+
+        std::fs::write(&lib, "a").unwrap();
+        let built = listing_stamps("/missing/csound", &args);
+        assert!(built[1].is_some(), "an existing library has a stamp");
+
+        let file = std::fs::OpenOptions::new().write(true).open(&lib).unwrap();
+        file.set_modified(SystemTime::now() + Duration::from_secs(60)).unwrap();
+        assert_ne!(listing_stamps("/missing/csound", &args), built, "a rebuilt library asks Csound again");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bare_executable_names_are_looked_up_in_path() {
+        assert!(resolve_executable(if cfg!(windows) { "cmd" } else { "sh" }).is_some());
+        assert!(resolve_executable("surely-not-an-installed-program").is_none());
+        assert_eq!(resolve_executable("/abs/csound"), Some(PathBuf::from("/abs/csound")));
     }
 
     #[test]

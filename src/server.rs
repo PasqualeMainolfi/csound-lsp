@@ -142,9 +142,27 @@ pub struct Backend {
     settings: Arc<RwLock<CsoundSettings>>,
     // types registered by the plugins, from `csound --list-structs`
     plugin_types: Arc<RwLock<resolve_pulgins::ListedStructs>>,
-    // executable and plugin arguments of the last listing, so that Csound runs again only when they change
-    listed_with: Arc<RwLock<Option<(String, Vec<String>)>>>,
+    // executable, plugin arguments and their file stamps at the last listing,
+    // so that Csound runs again only when one of them changes
+    listed_with: Arc<RwLock<Option<ListingKey>>>,
     listing_lock: Arc<tokio::sync::Mutex<()>>
+}
+
+#[derive(Clone, PartialEq)]
+struct ListingKey {
+    executable: String,
+    plugin_args: Vec<String>,
+    stamps: resolve_pulgins::ListingStamps
+}
+
+impl ListingKey {
+    fn new(executable: &str, plugin_args: &[String]) -> Self {
+        Self {
+            executable: executable.to_string(),
+            plugin_args: plugin_args.to_vec(),
+            stamps: resolve_pulgins::listing_stamps(executable, plugin_args)
+        }
+    }
 }
 
 // How the user runs Csound: from `initializationOptions` and `workspace/didChangeConfiguration`,
@@ -254,7 +272,7 @@ impl Backend {
             Some(listing) => {
                 let listed = listing.opcodes;
                 *self.plugin_types.write().await = listing.structs;
-                *self.listed_with.write().await = Some((settings.executable.clone(), settings.plugin_args.clone()));
+                *self.listed_with.write().await = Some(ListingKey::new(&settings.executable, &settings.plugin_args));
 
                 match resolve_pulgins::load_csound_plugins_repo_resources(&global_temp, &listed, &mut plugins_opcodes).await {
                     Ok(added) => {
@@ -349,10 +367,10 @@ impl Backend {
         let _guard = self.listing_lock.lock().await;
         let wanted = self.wanted_plugin_args().await;
         let settings = self.settings.read().await.clone();
-        let key = (settings.executable.clone(), wanted.clone());
+        let key = ListingKey::new(&settings.executable, &wanted);
         if self.listed_with.read().await.as_ref() == Some(&key) { return; }
 
-        // recorded even if it fails, so that a wrong path is not retried on every save
+        // recorded even if it fails, so that a wrong path is retried only once a file it names changes
         *self.listed_with.write().await = Some(key);
         let Some(listing) = self.list_csound(&settings, &wanted).await else { return; };
 
