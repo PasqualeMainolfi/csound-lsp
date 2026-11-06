@@ -402,7 +402,7 @@ impl Backend {
         let mut cached_diag: HashSet<(u32, u32, u32, u32, String)> = HashSet::new();
         if let Some(doc) = d.get_mut(&uri) {
             let text = doc.text.to_string();
-            let nodes_to_diagnostics = parser::iterate_tree_with_types(&doc.tree, &text, &uri, &plugin_types);
+            let nodes_to_diagnostics = parser::iterate_tree_with_types(&doc.tree, &text, &uri, &jr.known_types(&plugin_types));
             doc.cached_typed_vars = nodes_to_diagnostics.typed_vars;
             doc.user_definitions = nodes_to_diagnostics.user_definitions;
             let doc_dir = uri.to_file_path().ok().and_then(|p| p.parent().map(Path::to_path_buf));
@@ -888,8 +888,11 @@ impl LanguageServer for Backend {
                         if is_type {
                             if let Some(child_type_name) = parser::get_node_name(node, &doc.text.to_string()) {
                                 if let Some(sd) = doc.user_definitions.user_defined_types.get(&child_type_name) {
-                                    let title = if sd.from_plugin { "Plugin Type" } else { "User-Defined Type" };
-                                    let md = format!("## {}\n```csound\n{}\n```", title, sd.udt_format);
+                                    let mut md = format!("## {}\n```csound\n{}\n```", sd.hover_title(), sd.udt_format);
+                                    if let Some(documentation) = &sd.documentation {
+                                        md.push_str("\n\n");
+                                        md.push_str(documentation);
+                                    }
                                     return Ok(Some(utils::hover_helper(md)))
                                 }
 

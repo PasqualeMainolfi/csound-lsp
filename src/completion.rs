@@ -657,7 +657,8 @@ mod tests {
             oflag_data: Some(HashMap::from([
                 ("-o FILE, --output=FILE".to_string(), opcode("-o FILE, --output=FILE", "-o")),
                 ("-d, --nodisplays".to_string(), opcode("-d, --nodisplays", "-d"))
-            ]))
+            ])),
+            structs_data: HashMap::new()
         };
 
         let d = Doc { tree: parsed.tree, doc_type: parsed.tree_type, text, uri, definitions, typed_vars, references };

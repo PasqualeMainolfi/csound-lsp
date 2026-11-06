@@ -227,8 +227,13 @@ pub struct UserDefinedType {
     pub udt_name: String,
     pub udt_format: String,
     pub udt_members: Option<Vec<(String, String)>>,
-    // registered by a plugin and listed by `csound --list-structs`
-    pub from_plugin: bool
+    // known before the file is read: registered by a plugin (`csound --list-structs`)
+    // or by a host such as Cabbage (from the manual), so a struct in the file may replace it
+    pub from_plugin: bool,
+    // the host that registers it, e.g. "Cabbage"; None for plugin and file types
+    pub source: Option<String>,
+    // markdown shown on hover below the definition
+    pub documentation: Option<String>
 }
 
 impl UserDefinedType {
@@ -237,7 +242,17 @@ impl UserDefinedType {
             udt_name: String::new(),
             udt_format: String::new(),
             udt_members: None,
-            from_plugin: false
+            from_plugin: false,
+            source: None,
+            documentation: None
+        }
+    }
+
+    pub fn hover_title(&self) -> String {
+        match &self.source {
+            Some(source) => format!("{} Type", source),
+            None if self.from_plugin => "Plugin Type".to_string(),
+            None => "User-Defined Type".to_string()
         }
     }
 }

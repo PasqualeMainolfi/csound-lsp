@@ -1,4 +1,5 @@
 use crate::utils;
+use crate::parser::UserDefinedType;
 
 use once_cell::sync::Lazy;
 use regex::{ Regex, Captures };
@@ -19,6 +20,8 @@ pub const EXAMPLES_DIR: &str = "csound_resources/examples";
 pub const OPCODES_QUERY: &str = "csound_resources/csound.json";
 pub const FLAGS_QUERY: &str = "csound_resources/flags.json";
 pub const MACROS_QUERY: &str = "csound_resources/macros.json";
+// struct types a host registers (Cabbage), which `csound --list-structs` can't see
+pub const STRUCTS_QUERY: &str = "csound_resources/structs.json";
 
 fn load_opcodes(opcodes_folder: &Path, examples_folder: &Path) -> std::io::Result<HashMap<String, String>> {
     let mut map = HashMap::new();
@@ -173,11 +176,72 @@ pub struct OMacro {
     pub equivalent_to: String
 }
 
+// `{ "CabbageNumTrig": { "members": [["val", "k"], ["trig", "k"]], "description": "...",
+//    "opcodes": ["cabbageGetValue"], "source": "Cabbage", "doc": "https://..." } }`
+#[derive(Deserialize, Debug, Clone)]
+pub struct ManualStruct {
+    pub members: Vec<(String, String)>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub opcodes: Vec<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub doc: Option<String>
+}
+
+impl ManualStruct {
+    pub fn to_udt(&self, name: &str) -> UserDefinedType {
+        let members = self.members.iter().map(|(n, t)| format!("{}:{}", n, t)).collect::<Vec<_>>().join(", ");
+        let mut documentation = Vec::new();
+        if !self.description.is_empty() {
+            documentation.push(self.description.clone());
+        }
+        if !self.opcodes.is_empty() {
+            let opcodes = self.opcodes.iter().map(|o| format!("`{}`", o)).collect::<Vec<_>>().join(", ");
+            documentation.push(format!("**Accepted by:** {}", opcodes));
+        }
+        if let Some(doc) = &self.doc {
+            let what = self.source.as_deref().map(|s| format!("{} documentation", s)).unwrap_or_else(|| "Documentation".to_string());
+            documentation.push(format!("[{}]({})", what, doc));
+        }
+
+        let mut udt = UserDefinedType::new();
+        udt.udt_name = name.to_string();
+        udt.udt_format = format!("struct {} {}", name, members);
+        udt.udt_members = Some(self.members.clone());
+        udt.from_plugin = true;
+        udt.source = self.source.clone();
+        udt.documentation = (!documentation.is_empty()).then(|| documentation.join("\n\n"));
+        udt
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CsoundJsonData {
     pub opcodes_data: Option<HashMap<String, OpcodesData>>,
     pub omacros_data: Option<HashMap<String, OMacro>>,
-    pub oflag_data: Option<HashMap<String, OpcodesData>>
+    pub oflag_data: Option<HashMap<String, OpcodesData>>,
+    pub structs_data: HashMap<String, UserDefinedType>
+}
+
+impl CsoundJsonData {
+    // The types a file can use before it defines any: the manual's host types,
+    // then those listed by Csound, which win on a name clash.
+    pub fn known_types(&self, plugin_types: &HashMap<String, UserDefinedType>) -> HashMap<String, UserDefinedType> {
+        let mut types = self.structs_data.clone();
+        types.extend(plugin_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        types
+    }
+}
+
+pub fn parse_manual_structs(json: &str) -> serde_json::Result<HashMap<String, UserDefinedType>> {
+    let structs = serde_json::from_str::<HashMap<String, ManualStruct>>(json)?;
+    Ok(structs.iter()
+        .filter(|(_, s)| !s.members.is_empty())
+        .map(|(name, s)| (name.clone(), s.to_udt(name)))
+        .collect())
 }
 
 pub async fn read_csound_json_data(cj: &mut CsoundJsonData, base_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -215,5 +279,69 @@ pub async fn read_csound_json_data(cj: &mut CsoundJsonData, base_dir: &PathBuf) 
         }
     }
 
+    // manual releases before the Cabbage structs have no such file
+    let json_structs = base_dir.join(STRUCTS_QUERY);
+    if let Ok(jst) = tokio::fs::read_to_string(&json_structs).await {
+        match parse_manual_structs(&jst) {
+            Ok(map) => cj.structs_data = map,
+            Err(e) => eprintln!("ERROR: Could not parse struct JSON: {}", e)
+        }
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STRUCTS: &str = r#"{
+        "CabbageNumTrig": {
+            "members": [["val", "k"], ["trig", "k"]],
+            "description": "A value plus a trigger.",
+            "opcodes": ["cabbageGetValue"],
+            "source": "Cabbage",
+            "doc": "https://cabbageaudio.com/docs/using/csound7/#built-in-trigger-structs"
+        },
+        "Empty": { "members": [] }
+    }"#;
+
+    #[test]
+    fn manual_structs_become_host_types() {
+        let types = parse_manual_structs(STRUCTS).unwrap();
+        assert!(!types.contains_key("Empty"), "a struct without members is skipped");
+
+        let udt = &types["CabbageNumTrig"];
+        assert_eq!(udt.udt_format, "struct CabbageNumTrig val:k, trig:k");
+        assert_eq!(udt.udt_members, Some(vec![("val".to_string(), "k".to_string()), ("trig".to_string(), "k".to_string())]));
+        assert!(udt.from_plugin, "a struct in the file may replace it");
+        assert_eq!(udt.hover_title(), "Cabbage Type");
+
+        let doc = udt.documentation.as_deref().unwrap();
+        assert!(doc.starts_with("A value plus a trigger."));
+        assert!(doc.contains("`cabbageGetValue`"));
+        assert!(doc.contains("[Cabbage documentation](https://cabbageaudio.com/docs/using/csound7/#built-in-trigger-structs)"));
+    }
+
+    #[test]
+    fn types_listed_by_csound_win_over_the_manual() {
+        let data = CsoundJsonData { structs_data: parse_manual_structs(STRUCTS).unwrap(), ..Default::default() };
+        let mut listed = UserDefinedType::new();
+        listed.udt_name = "CabbageNumTrig".to_string();
+        listed.from_plugin = true;
+        let plugin_types = HashMap::from([("CabbageNumTrig".to_string(), listed)]);
+
+        let known = data.known_types(&plugin_types);
+        assert_eq!(known["CabbageNumTrig"].hover_title(), "Plugin Type");
+        assert_eq!(data.known_types(&HashMap::new())["CabbageNumTrig"].hover_title(), "Cabbage Type");
+    }
+
+    #[test]
+    fn manual_structs_json_of_the_release_parses() {
+        // the file the manual CI ships, when the manual checkout sits next to this repo
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../csound_data/csound_manual/parse_data_to_lsp/json_data/structs.json");
+        let Ok(json) = std::fs::read_to_string(path) else { return };
+        let types = parse_manual_structs(&json).unwrap();
+        assert!(types.contains_key("CabbageNumTrig") && types.contains_key("CabbageStrTrig"));
+    }
 }
